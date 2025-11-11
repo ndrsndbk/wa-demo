@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 
-/**
+/***
  * Helper: Supabase client (per-request)
  */
 function getSupabase(env) {
