@@ -1,19 +1,86 @@
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
-// Uses Supabase for state and WhatsApp Cloud API for messaging.
+// No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.48.0";
+// ---------- Supabase REST helpers ----------
 
-/** Create Supabase client per request */
-function getSupabase(env) {
+function getSupabaseConfig(env) {
   const url = env.SUPABASE_URL;
   const key = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY;
   if (!url || !key) {
     throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/KEY");
   }
-  return createClient(url, key, { auth: { persistSession: false } });
+  return { url: url.replace(/\/+$/, ""), key };
 }
 
-/** WhatsApp helpers */
+function sbHeaders(env, extra = {}) {
+  const { key } = getSupabaseConfig(env);
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    "Content-Type": "application/json",
+    ...extra,
+  };
+}
+
+async function sbSelectOne(env, table, filterQuery, columns = "*") {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/${table}?${filterQuery}&select=${encodeURIComponent(
+      columns
+    )}&limit=1`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) {
+    console.error(`Supabase selectOne ${table} error`, res.status, await res.text());
+    return null;
+  }
+  const data = await res.json();
+  return data[0] || null;
+}
+
+async function sbInsert(env, table, rows) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(`${url}/rest/v1/${table}`, {
+    method: "POST",
+    headers: sbHeaders(env, { Prefer: "return=minimal" }),
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) {
+    console.error(`Supabase insert ${table} error`, res.status, await res.text());
+  }
+}
+
+async function sbUpsert(env, table, rows, keyCols) {
+  const { url } = getSupabaseConfig(env);
+  const onConflict = Array.isArray(keyCols)
+    ? keyCols.join(",")
+    : keyCols;
+  const res = await fetch(
+    `${url}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
+    {
+      method: "POST",
+      headers: sbHeaders(env, { Prefer: "resolution=merge-duplicates" }),
+      body: JSON.stringify(rows),
+    }
+  );
+  if (!res.ok) {
+    console.error(`Supabase upsert ${table} error`, res.status, await res.text());
+  }
+}
+
+async function sbUpdate(env, table, filterQuery, patch) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(`${url}/rest/v1/${table}?${filterQuery}`, {
+    method: "PATCH",
+    headers: sbHeaders(env, { Prefer: "return=minimal" }),
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    console.error(`Supabase update ${table} error`, res.status, await res.text());
+  }
+}
+
+// ---------- WhatsApp helpers ----------
 
 function getPhoneNumberId(env) {
   return env.PHONE_NUMBER_ID || "858272234034248"; // your real WA number ID
@@ -28,7 +95,6 @@ async function sendWhatsApp(env, payload) {
   }
 
   const url = `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`;
-
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -46,7 +112,7 @@ async function sendWhatsApp(env, payload) {
   }
 }
 
-async function sendText(env, to, body) {
+function sendText(env, to, body) {
   return sendWhatsApp(env, {
     messaging_product: "whatsapp",
     to,
@@ -55,7 +121,7 @@ async function sendText(env, to, body) {
   });
 }
 
-async function sendImage(env, to, link, caption) {
+function sendImage(env, to, link, caption) {
   const image = { link };
   if (caption) image.caption = caption;
   return sendWhatsApp(env, {
@@ -66,7 +132,7 @@ async function sendImage(env, to, link, caption) {
   });
 }
 
-async function sendInteractiveButtons(env, to, bodyText, buttons) {
+function sendInteractiveButtons(env, to, bodyText, buttons) {
   return sendWhatsApp(env, {
     messaging_product: "whatsapp",
     to,
@@ -84,7 +150,7 @@ async function sendInteractiveButtons(env, to, bodyText, buttons) {
   });
 }
 
-/** Card URL helpers */
+// ---------- Card URL helpers ----------
 
 function buildCardUrl(env, visits) {
   const base =
@@ -103,114 +169,100 @@ function getZeroCardUrl(env) {
   return env.STAMP_CARD_ZERO_URL || buildCardUrl(env, 0);
 }
 
-/** Idempotency (processed_events) */
+// ---------- Idempotency: processed_events ----------
 
-async function alreadyProcessed(supabase, messageId) {
+async function alreadyProcessed(env, messageId) {
   if (!messageId) return false;
-  const { data, error } = await supabase
-    .from("processed_events")
-    .select("message_id")
-    .eq("message_id", messageId)
-    .limit(1);
-  if (error) {
-    console.error("processed_events select error:", error);
-    return false;
-  }
-  return !!(data && data.length);
+  const row = await sbSelectOne(
+    env,
+    "processed_events",
+    `message_id=eq.${encodeURIComponent(messageId)}`,
+    "message_id"
+  );
+  return !!row;
 }
 
-async function markProcessed(supabase, messageId) {
+async function markProcessed(env, messageId) {
   if (!messageId) return;
-  const { error } = await supabase
-    .from("processed_events")
-    .insert({ message_id: messageId });
-  if (error) {
-    console.warn("processed_events insert error:", error);
-  }
+  await sbInsert(env, "processed_events", [{ message_id: messageId }]);
 }
 
-/** Conversation state (conversation_state) */
+// ---------- Conversation state: conversation_state ----------
 
-async function getState(supabase, customerId) {
-  const { data, error } = await supabase
-    .from("conversation_state")
-    .select("active_flow, step")
-    .eq("customer_id", customerId)
-    .limit(1);
-  if (error) {
-    console.error("get_state error:", error);
-    return { active_flow: null, step: 0 };
-  }
-  if (!data || !data.length) return { active_flow: null, step: 0 };
-  return data[0];
+async function getState(env, customerId) {
+  const row = await sbSelectOne(
+    env,
+    "conversation_state",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "active_flow,step"
+  );
+  if (!row) return { active_flow: null, step: 0 };
+  return row;
 }
 
-async function setState(supabase, customerId, flow, step = 0) {
+async function setState(env, customerId, flow, step = 0) {
   const payload = {
     customer_id: customerId,
     active_flow: flow,
     step,
     updated_at: new Date().toISOString(),
   };
-  const { error } = await supabase
-    .from("conversation_state")
-    .upsert(payload);
-  if (error) console.error("set_state error:", error);
+  await sbUpsert(env, "conversation_state", [payload], "customer_id");
 }
 
-async function clearState(supabase, customerId) {
-  await setState(supabase, customerId, null, 0);
+async function clearState(env, customerId) {
+  await setState(env, customerId, null, 0);
 }
 
-/** Customers */
+// ---------- Customers table helpers ----------
 
-async function upsertCustomer(supabase, customerId, profileName) {
+async function upsertCustomer(env, customerId, profileName) {
   const now = new Date().toISOString();
-  const { data, error } = await supabase
-    .from("customers")
-    .select("customer_id")
-    .eq("customer_id", customerId)
-    .limit(1);
+  const existing = await sbSelectOne(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "customer_id"
+  );
 
-  if (error) {
-    console.error("upsert_customer select error:", error);
-    return;
-  }
-
-  if (data && data.length) {
-    const { error: updErr } = await supabase
-      .from("customers")
-      .update({ last_seen_at: now, profile_name: profileName })
-      .eq("customer_id", customerId);
-    if (updErr) console.error("upsert_customer update error:", updErr);
+  if (existing) {
+    await sbUpdate(
+      env,
+      "customers",
+      `customer_id=eq.${encodeURIComponent(customerId)}`,
+      { last_seen_at: now, profile_name: profileName }
+    );
   } else {
-    const { error: insErr } = await supabase.from("customers").insert({
-      customer_id: customerId,
-      profile_name: profileName,
-      created_at: now,
-      last_seen_at: now,
-    });
-    if (insErr) console.error("upsert_customer insert error:", insErr);
+    await sbInsert(env, "customers", [
+      {
+        customer_id: customerId,
+        profile_name: profileName,
+        created_at: now,
+        last_seen_at: now,
+      },
+    ]);
   }
 }
 
-async function setCustomerBirthday(supabase, customerId, birthdayIso) {
-  const { error } = await supabase
-    .from("customers")
-    .update({ birthday: birthdayIso })
-    .eq("customer_id", customerId);
-  if (error) console.error("set_customer_birthday error:", error);
+async function setCustomerBirthday(env, customerId, birthdayIso) {
+  await sbUpdate(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    { birthday: birthdayIso }
+  );
 }
 
-async function setCustomerPreferredDrink(supabase, customerId, drink) {
-  const { error } = await supabase
-    .from("customers")
-    .update({ preferred_drink: drink })
-    .eq("customer_id", customerId);
-  if (error) console.error("set_customer_preferred_drink error:", error);
+async function setCustomerPreferredDrink(env, customerId, drink) {
+  await sbUpdate(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    { preferred_drink: drink }
+  );
 }
 
-/** Birthday parsing */
+// ---------- Birthday parsing ----------
 
 function parseBirthday(raw) {
   if (!raw) return null;
@@ -230,20 +282,20 @@ function parseBirthday(raw) {
   return null;
 }
 
-/** SIGNUP flow */
+// ---------- SIGNUP flow ----------
 
-async function startSignupFlow(env, supabase, customerId, waName) {
+async function startSignupFlow(env, customerId, waName) {
   const msg =
     `Welcome${waName ? ", " + waName : ""} 👋\n` +
     "2 quick steps to join the stamp card:\n\n" +
     "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
     "_You get a free drink on your birthday._";
   await sendText(env, customerId, msg);
-  await setState(supabase, customerId, "signup", 1);
+  await setState(env, customerId, "signup", 1);
 }
 
-async function handleSignupTextStep1(env, supabase, customerId, text) {
-  const st = await getState(supabase, customerId);
+async function handleSignupTextStep1(env, customerId, text) {
+  const st = await getState(env, customerId);
   if (st.active_flow !== "signup" || st.step !== 1) return false;
 
   const iso = parseBirthday(text);
@@ -256,7 +308,7 @@ async function handleSignupTextStep1(env, supabase, customerId, text) {
     return true;
   }
 
-  await setCustomerBirthday(supabase, customerId, iso);
+  await setCustomerBirthday(env, customerId, iso);
 
   await sendInteractiveButtons(env, customerId, "2️⃣ Choose your go-to drink:", [
     { id: "drink_matcha", title: "Matcha" },
@@ -264,12 +316,12 @@ async function handleSignupTextStep1(env, supabase, customerId, text) {
     { id: "drink_cappuccino", title: "Cappuccino" },
   ]);
 
-  await setState(supabase, customerId, "signup", 2);
+  await setState(env, customerId, "signup", 2);
   return true;
 }
 
-async function handleSignupInteractiveStep2(env, supabase, customerId, replyId) {
-  const st = await getState(supabase, customerId);
+async function handleSignupInteractiveStep2(env, customerId, replyId) {
+  const st = await getState(env, customerId);
   if (st.active_flow !== "signup" || st.step !== 2) return false;
 
   const map = {
@@ -280,7 +332,7 @@ async function handleSignupInteractiveStep2(env, supabase, customerId, replyId) 
   const drink = map[replyId];
   if (!drink) return false;
 
-  await setCustomerPreferredDrink(supabase, customerId, drink);
+  await setCustomerPreferredDrink(env, customerId, drink);
 
   await sendText(env, customerId, "Nice choice 😎 Here’s your digital stamp card:");
   await sendImage(env, customerId, getZeroCardUrl(env));
@@ -291,18 +343,19 @@ async function handleSignupInteractiveStep2(env, supabase, customerId, replyId) 
     "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
   );
 
-  await setState(supabase, customerId, "demo_stamp", 1);
+  await setState(env, customerId, "demo_stamp", 1);
   return true;
 }
 
-/** STAMP handling */
+// ---------- STAMP handling ----------
 
-async function handleStamp(env, supabase, customerId, token) {
-  const st = await getState(supabase, customerId);
+async function handleStamp(env, customerId, token) {
+  const st = await getState(env, customerId);
   if (st.active_flow !== "demo_stamp" || st.step !== 1) {
     // allow STAMP even outside strict state for demo
     if (token !== "STAMP") return false;
   }
+
   if (token !== "STAMP") {
     await sendText(
       env,
@@ -312,31 +365,29 @@ async function handleStamp(env, supabase, customerId, token) {
     return true;
   }
 
-  const { data, error } = await supabase
-    .from("customers")
-    .select("number_of_visits")
-    .eq("customer_id", customerId)
-    .limit(1);
-  if (error) console.error("fetch visits error:", error);
+  const row = await sbSelectOne(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "number_of_visits"
+  );
 
-  const current = (data && data[0] && Number(data[0].number_of_visits)) || 0;
+  const current = row && row.number_of_visits ? Number(row.number_of_visits) : 0;
   const next = current + 1;
   const now = new Date().toISOString();
 
-  const { error: upErr } = await supabase.from("customers").upsert({
-    customer_id: customerId,
-    number_of_visits: next,
-    last_visit_at: now,
-  });
-  if (upErr) {
-    console.error("demo_stamp upsert error:", upErr);
-    await sendText(
-      env,
-      customerId,
-      "⚠️ Sorry, I couldn't record your stamp. Please try again."
-    );
-    return true;
-  }
+  await sbUpsert(
+    env,
+    "customers",
+    [
+      {
+        customer_id: customerId,
+        number_of_visits: next,
+        last_visit_at: now,
+      },
+    ],
+    "customer_id"
+  );
 
   const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
@@ -348,11 +399,11 @@ async function handleStamp(env, supabase, customerId, token) {
       "🎉 *Demo complete.* Reply *SIGNUP* to restart or share this with your team."
   );
 
-  await setState(supabase, customerId, "demo_complete", 0);
+  await setState(env, customerId, "demo_complete", 0);
   return true;
 }
 
-/** GET: webhook verification */
+// ---------- GET: webhook verification ----------
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
@@ -369,11 +420,9 @@ export async function onRequestGet({ request, env }) {
   return new Response("forbidden", { status: 403 });
 }
 
-/** POST: handle incoming WhatsApp messages */
+// ---------- POST: handle incoming WhatsApp messages ----------
 
 export async function onRequestPost({ request, env }) {
-  const supabase = getSupabase(env);
-
   try {
     const data = await request.json();
 
@@ -390,12 +439,12 @@ export async function onRequestPost({ request, env }) {
     const waName = contacts[0]?.profile?.name || null;
 
     // idempotency
-    if (await alreadyProcessed(supabase, msgId)) {
+    if (await alreadyProcessed(env, msgId)) {
       return new Response("ok", { status: 200 });
     }
-    await markProcessed(supabase, msgId);
+    await markProcessed(env, msgId);
 
-    await upsertCustomer(supabase, from, waName);
+    await upsertCustomer(env, from, waName);
 
     const type = message.type;
 
@@ -409,10 +458,7 @@ export async function onRequestPost({ request, env }) {
         replyId = interactive.list_reply?.id;
       }
 
-      if (
-        replyId &&
-        (await handleSignupInteractiveStep2(env, supabase, from, replyId))
-      ) {
+      if (replyId && (await handleSignupInteractiveStep2(env, from, replyId))) {
         return new Response("ok", { status: 200 });
       }
 
@@ -426,18 +472,18 @@ export async function onRequestPost({ request, env }) {
 
       // Start demo/sign-up
       if (token === "DEMO" || token === "SIGNUP") {
-        await startSignupFlow(env, supabase, from, waName);
+        await startSignupFlow(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
       // Birthday step
-      if (await handleSignupTextStep1(env, supabase, from, raw)) {
+      if (await handleSignupTextStep1(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
       // Stamp
       if (token === "STAMP") {
-        await handleStamp(env, supabase, from, token);
+        await handleStamp(env, from, token);
         return new Response("ok", { status: 200 });
       }
 
