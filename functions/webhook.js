@@ -22,6 +22,18 @@ function sbHeaders(env, extra = {}) {
   };
 }
 
+// Safe JSON parser for Supabase responses
+async function safeJson(resp) {
+  const text = await resp.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error("Failed to parse Supabase JSON:", e, "Body was:", text);
+    throw e;
+  }
+}
+
 async function sbSelectOne(env, table, filter, columns = "*") {
   const { url } = getSupabaseConfig(env);
   const qs = `select=${encodeURIComponent(columns)}&${filter}&limit=1`;
@@ -30,10 +42,10 @@ async function sbSelectOne(env, table, filter, columns = "*") {
     headers: sbHeaders(env),
   });
   if (!resp.ok) {
-    console.error(`Supabase SELECT error on ${table}:`, await resp.text());
+    console.error(`Supabase SELECT error on ${table}:`, resp.status, await resp.text());
     throw new Error("Supabase select error");
   }
-  const data = await resp.json();
+  const data = (await safeJson(resp)) || [];
   return data[0] || null;
 }
 
@@ -45,10 +57,11 @@ async function sbInsert(env, table, rows) {
     body: JSON.stringify(rows),
   });
   if (!resp.ok) {
-    console.error(`Supabase INSERT error on ${table}:`, await resp.text());
+    console.error(`Supabase INSERT error on ${table}:`, resp.status, await resp.text());
     throw new Error("Supabase insert error");
   }
-  return resp.json();
+  // We don't currently use the response body; avoid JSON.parse on empty
+  return null;
 }
 
 async function sbUpsert(env, table, rows, onConflict) {
@@ -62,10 +75,11 @@ async function sbUpsert(env, table, rows, onConflict) {
     }
   );
   if (!resp.ok) {
-    console.error(`Supabase UPSERT error on ${table}:`, await resp.text());
+    console.error(`Supabase UPSERT error on ${table}:`, resp.status, await resp.text());
     throw new Error("Supabase upsert error");
   }
-  return resp.json();
+  // Not using response body
+  return null;
 }
 
 async function sbUpdate(env, table, filter, patch) {
@@ -76,10 +90,11 @@ async function sbUpdate(env, table, filter, patch) {
     body: JSON.stringify(patch),
   });
   if (!resp.ok) {
-    console.error(`Supabase UPDATE error on ${table}:`, await resp.text());
+    console.error(`Supabase UPDATE error on ${table}:`, resp.status, await resp.text());
     throw new Error("Supabase update error");
   }
-  return resp.json();
+  // Not using response body
+  return null;
 }
 
 // ---------- WhatsApp send helpers ----------
@@ -103,7 +118,7 @@ async function sendWhatsApp(env, payload) {
   });
 
   if (!resp.ok) {
-    console.error("WhatsApp send error:", await resp.text());
+    console.error("WhatsApp send error:", resp.status, await resp.text());
   }
 }
 
@@ -301,9 +316,13 @@ function parseBirthday(text) {
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Welcome${waName ? ", " + waName : ""} 👋\n` +
-    "2 quick steps to join the stamp card:\n\n" +
-    "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
+    `Welcome${waName ? ", " + waName : ""} 👋
+` +
+    "2 quick steps to join the stamp card:
+
+" +
+    "1️⃣ When is your birthday? (e.g. 1995-07-12)
+" +
     "_You get a free drink on your birthday._";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
@@ -355,7 +374,8 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
+    "Now imagine you’ve just bought a coffee ☕️
+Type *STAMP* to claim your first stamp."
   );
 
   await setState(env, customerId, "demo_stamp", 1);
@@ -379,7 +399,9 @@ async function logMeetingResponse(env, customerId, waName, kind, answer) {
 
 async function startMeetFlow(env, customerId, waName) {
   const greeting =
-    `Awesome${waName ? " " + waName : ""}! 👋\n\n` +
+    `Awesome${waName ? " " + waName : ""}! 👋
+
+` +
     "Which bespoke service are you interested in?";
   await sendInteractiveButtons(env, customerId, greeting, [
     { id: "meet_meta", title: "Meta" },
@@ -406,7 +428,9 @@ async function handleMeetInteractiveStep(env, customerId, waName, replyId) {
   await sendText(
     env,
     customerId,
-    "Thanks! 🙌\n\nPlease respond with a *day + time* that suits you best for a chat."
+    "Thanks! 🙌
+
+Please respond with a *day + time* that suits you best for a chat."
   );
 
   await setState(env, customerId, "meet", 2);
@@ -422,7 +446,11 @@ async function handleMeetTextStep2(env, customerId, waName, text) {
   await sendText(
     env,
     customerId,
-    "All set ✅\n\nWe’ve received your meeting request and will get back to you soon!\n\n" +
+    "All set ✅
+
+We’ve received your meeting request and will get back to you soon!
+
+" +
       "Please feel free to reply here with any extra info or context for our chat."
   );
 
@@ -549,9 +577,13 @@ async function handleStamp(env, customerId, token) {
     await sendText(
       env,
       customerId,
-      "🔥 You’re on a streak!\n\n" +
-        `That’s *${newStreak} visits in a row*.\n\n` +
-        "Keep it going — hit a streak of *5* visits and you’ll earn an *extra stamp* on your card. 💪"
+      "🔥 You’re on a streak!
+
+" +
+        `That’s *${newStreak} visits in a row*.
+
+` +
+        "Keep it going — hit a streak of *5* visits and you’ll earn *extra stamps* on your card. 💪"
     );
   }
 
@@ -560,7 +592,9 @@ async function handleStamp(env, customerId, token) {
     await sendText(
       env,
       customerId,
-      "🎉 Streak unlocked!\n\nYou’ve hit a *5-visit streak* — you’ve earned *double stamps* on this visit. 🙌"
+      "🎉 Streak unlocked!
+
+You’ve hit a *5-visit streak* — you’ve earned *double stamps* on this visit. 🙌"
     );
   }
 
@@ -568,8 +602,11 @@ async function handleStamp(env, customerId, token) {
   await sendText(
     env,
     customerId,
-    "🎉 *Demo complete.*\n\n" +
-      "Reply *SIGNUP* to restart, or share this demo with your team:\n" +
+    "🎉 *Demo complete.*
+
+" +
+      "Reply *SIGNUP* to restart, or share this demo with your team:
+" +
       "https://wa.me/84764929881?text=DEMO"
   );
 
@@ -675,10 +712,16 @@ export const onRequestPost = async (context) => {
         await sendText(
           env,
           from,
-          `Hey${namePart} 👋\n\n` +
-            "Thanks for connecting! 🙌\n\n" +
-            "Reply:\n" +
-            "• *MEET* to book a meeting\n" +
+          `Hey${namePart} 👋
+
+` +
+            "Thanks for connecting! 🙌
+
+" +
+            "Reply:
+" +
+            "• *MEET* to book a meeting
+" +
             "• *DEMO* if you'd like to test out the WhatsApp stamp card."
         );
         return new Response("ok", { status: 200 });
@@ -722,7 +765,8 @@ export const onRequestPost = async (context) => {
       await sendText(
         env,
         from,
-        "👋 Welcome to the WhatsApp stamp card demo.\n" +
+        "👋 Welcome to the WhatsApp stamp card demo.
+" +
           "Send *CONNECT* to see options, *DEMO* or *SIGNUP* to start, or *STAMP* after a visit."
       );
       return new Response("ok", { status: 200 });
