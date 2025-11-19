@@ -1,5 +1,5 @@
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
-// No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
+// Single-file version (A) with Supabase + WhatsApp Cloud API integration.
 
 // ---------- Supabase REST helpers ----------
 
@@ -158,7 +158,7 @@ function getZeroCardUrl(env) {
 function buildCardUrl(env, stamps) {
   const base = getBaseCardUrl(env);
   const capped = Math.max(0, Math.min(10, stamps));
-  return `${base}/card-${capped}.png>;
+  return `${base}/card-${capped}.png`;
 }
 
 // ---------- Conversation / state helpers ----------
@@ -285,27 +285,25 @@ function parseBirthday(text) {
   const t = text.trim();
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
   if (!m) return null;
-  const [_, y, mo, d] = m;
+  const y = m[1];
+  const mo = m[2];
+  const d = m[3];
   const year = Number(y);
   const month = Number(mo);
   const day = Number(d);
   if (year < 1900 || year > 2100) return null;
   if (month < 1 || month > 12) return null;
   if (day < 1 || day > 31) return null;
-  return `${y}-${mo}-${d};
+  return `${y}-${mo}-${d}`;
 }
 
 // ---------- SIGNUP flow ----------
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Welcome${waName ? ", " + waName : ""} 👋
-` +
-    "2 quick steps to join the stamp card:
-
-" +
-    "1️⃣ When is your birthday? (e.g. 1995-07-12)
-" +
+    `Welcome${waName ? ", " + waName : ""} 👋\n` +
+    "2 quick steps to join the stamp card:\n\n" +
+    "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
     "_You get a free drink on your birthday._";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
@@ -357,13 +355,14 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️
-Type *STAMP* to claim your first stamp."
+    "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
   );
 
   await setState(env, customerId, "demo_stamp", 1);
   return true;
 }
+
+// ---------- Meeting (MEET) flow ----------
 
 async function logMeetingResponse(env, customerId, waName, kind, answer) {
   const now = new Date().toISOString();
@@ -380,9 +379,7 @@ async function logMeetingResponse(env, customerId, waName, kind, answer) {
 
 async function startMeetFlow(env, customerId, waName) {
   const greeting =
-    `Awesome${waName ? " " + waName : ""}! 👋
-
-` +
+    `Awesome${waName ? " " + waName : ""}! 👋\n\n` +
     "Which bespoke service are you interested in?";
   await sendInteractiveButtons(env, customerId, greeting, [
     { id: "meet_meta", title: "Meta" },
@@ -409,9 +406,7 @@ async function handleMeetInteractiveStep(env, customerId, waName, replyId) {
   await sendText(
     env,
     customerId,
-    "Thanks! 🙌
-
-Please respond with a *day + time* that suits you best for a chat."
+    "Thanks! 🙌\n\nPlease respond with a *day + time* that suits you best for a chat."
   );
 
   await setState(env, customerId, "meet", 2);
@@ -427,11 +422,8 @@ async function handleMeetTextStep2(env, customerId, waName, text) {
   await sendText(
     env,
     customerId,
-    "All set ✅
-
-We’ve received your meeting request and will get back to you soon!
-
-Please feel free to reply here with any extra info or context for our chat."
+    "All set ✅\n\nWe’ve received your meeting request and will get back to you soon!\n\n" +
+      "Please feel free to reply here with any extra info or context for our chat."
   );
 
   await clearState(env, customerId);
@@ -624,10 +616,10 @@ export const onRequestPost = async (context) => {
       return new Response("ok", { status: 200 });
     }
 
-    const entry = json.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
-    const messages = value?.messages || [];
+    const entry = json.entry && json.entry[0];
+    const change = entry && entry.changes && entry.changes[0];
+    const value = change && change.value;
+    const messages = (value && value.messages) || [];
     if (!messages.length) {
       return new Response("ok", { status: 200 });
     }
@@ -637,8 +629,9 @@ export const onRequestPost = async (context) => {
     const msgId = message.id;
     const type = message.type;
 
-    const contactProfile = value.contacts?.[0]?.profile;
-    const waName = contactProfile?.name || null;
+    const contactProfile =
+      value && value.contacts && value.contacts[0] && value.contacts[0].profile;
+    const waName = contactProfile && contactProfile.name ? contactProfile.name : null;
 
     await getOrCreateCustomer(env, from, waName);
     await touchCustomer(env, from);
@@ -654,9 +647,9 @@ export const onRequestPost = async (context) => {
       const interactive = message.interactive || {};
       let replyId = null;
       if (interactive.type === "button_reply") {
-        replyId = interactive.button_reply?.id;
+        replyId = interactive.button_reply && interactive.button_reply.id;
       } else if (interactive.type === "list_reply") {
-        replyId = interactive.list_reply?.id;
+        replyId = interactive.list_reply && interactive.list_reply.id;
       }
 
       if (replyId) {
@@ -673,7 +666,7 @@ export const onRequestPost = async (context) => {
 
     // Text messages
     if (type === "text") {
-      const raw = (message.text?.body || "").trim();
+      const raw = (message.text && message.text.body ? message.text.body : "").trim();
       const token = raw.toUpperCase();
 
       // CONNECT: simple router to MEET or DEMO
@@ -686,7 +679,7 @@ export const onRequestPost = async (context) => {
             "Thanks for connecting! 🙌\n\n" +
             "Reply:\n" +
             "• *MEET* to book a meeting\n" +
-            "• *DEMO* if you’d like to test out the WhatsApp stamp card."
+            "• *DEMO* if you'd like to test out the WhatsApp stamp card."
         );
         return new Response("ok", { status: 200 });
       }
