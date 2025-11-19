@@ -158,7 +158,7 @@ function getZeroCardUrl(env) {
 function buildCardUrl(env, stamps) {
   const base = getBaseCardUrl(env);
   const capped = Math.max(0, Math.min(10, stamps));
-  return `${base}/card-${capped}.png`;
+  return `${base}/card-${capped}.png>;
 }
 
 // ---------- Conversation / state helpers ----------
@@ -292,16 +292,20 @@ function parseBirthday(text) {
   if (year < 1900 || year > 2100) return null;
   if (month < 1 || month > 12) return null;
   if (day < 1 || day > 31) return null;
-  return `${y}-${mo}-${d}`;
+  return `${y}-${mo}-${d};
 }
 
 // ---------- SIGNUP flow ----------
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Welcome${waName ? ", " + waName : ""} 👋\n` +
-    "2 quick steps to join the stamp card:\n\n" +
-    "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
+    `Welcome${waName ? ", " + waName : ""} 👋
+` +
+    "2 quick steps to join the stamp card:
+
+" +
+    "1️⃣ When is your birthday? (e.g. 1995-07-12)
+" +
     "_You get a free drink on your birthday._";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
@@ -353,7 +357,8 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
+    "Now imagine you’ve just bought a coffee ☕️
+Type *STAMP* to claim your first stamp."
   );
 
   await setState(env, customerId, "demo_stamp", 1);
@@ -375,7 +380,9 @@ async function logMeetingResponse(env, customerId, waName, kind, answer) {
 
 async function startMeetFlow(env, customerId, waName) {
   const greeting =
-    `Awesome${waName ? " " + waName : ""}! 👋\n\n` +
+    `Awesome${waName ? " " + waName : ""}! 👋
+
+` +
     "Which bespoke service are you interested in?";
   await sendInteractiveButtons(env, customerId, greeting, [
     { id: "meet_meta", title: "Meta" },
@@ -402,7 +409,9 @@ async function handleMeetInteractiveStep(env, customerId, waName, replyId) {
   await sendText(
     env,
     customerId,
-    "Thanks! 🙌\n\nPlease respond with a *day + time* that suits you best for a chat."
+    "Thanks! 🙌
+
+Please respond with a *day + time* that suits you best for a chat."
   );
 
   await setState(env, customerId, "meet", 2);
@@ -418,8 +427,11 @@ async function handleMeetTextStep2(env, customerId, waName, text) {
   await sendText(
     env,
     customerId,
-    "All set ✅\n\nWe’ve received your meeting request and will get back to you soon!\n\n" +
-      "Please feel free to reply here with any extra info or context for our chat."
+    "All set ✅
+
+We’ve received your meeting request and will get back to you soon!
+
+Please feel free to reply here with any extra info or context for our chat."
   );
 
   await clearState(env, customerId);
@@ -598,12 +610,11 @@ export const onRequestPost = async (context) => {
   const { request, env } = context;
 
   try {
-    const bodyText = await request.text();
     let json;
     try {
-      json = JSON.parse(bodyText);
-    } catch (e) {
-      console.error("Invalid JSON payload:", bodyText);
+      json = await request.json();
+    } catch (err) {
+      console.error("JSON parse failed:", err);
       return new Response("ok", { status: 200 });
     }
 
