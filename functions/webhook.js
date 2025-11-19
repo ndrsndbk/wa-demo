@@ -1,5 +1,6 @@
+
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
-// Single-file version (A) with Supabase + WhatsApp Cloud API integration.
+// No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
 
 // ---------- Supabase REST helpers ----------
 
@@ -22,51 +23,40 @@ function sbHeaders(env, extra = {}) {
   };
 }
 
-// Safe JSON parser for Supabase responses
-async function safeJson(resp) {
-  const text = await resp.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch (e) {
-    console.error("Failed to parse Supabase JSON:", e, "Body was:", text);
-    throw e;
-  }
-}
-
-async function sbSelectOne(env, table, filter, columns = "*") {
+async function sbSelectOne(env, table, filterQuery, columns = "*") {
   const { url } = getSupabaseConfig(env);
-  const qs = `select=${encodeURIComponent(columns)}&${filter}&limit=1`;
-  const resp = await fetch(`${url}/rest/v1/${table}?${qs}`, {
-    method: "GET",
-    headers: sbHeaders(env),
-  });
-  if (!resp.ok) {
-    console.error(`Supabase SELECT error on ${table}:`, resp.status, await resp.text());
-    throw new Error("Supabase select error");
+  const res = await fetch(
+    `${url}/rest/v1/${table}?${filterQuery}&select=${encodeURIComponent(
+      columns
+    )}&limit=1`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) {
+    console.error(`Supabase selectOne ${table} error`, res.status, await res.text());
+    return null;
   }
-  const data = (await safeJson(resp)) || [];
+  const data = await res.json();
   return data[0] || null;
 }
 
 async function sbInsert(env, table, rows) {
   const { url } = getSupabaseConfig(env);
-  const resp = await fetch(`${url}/rest/v1/${table}`, {
+  const res = await fetch(`${url}/rest/v1/${table}`, {
     method: "POST",
-    headers: sbHeaders(env, { Prefer: "return=representation" }),
+    headers: sbHeaders(env, { Prefer: "return=minimal" }),
     body: JSON.stringify(rows),
   });
-  if (!resp.ok) {
-    console.error(`Supabase INSERT error on ${table}:`, resp.status, await resp.text());
-    throw new Error("Supabase insert error");
+  if (!res.ok) {
+    console.error(`Supabase insert ${table} error`, res.status, await res.text());
   }
-  // We don't currently use the response body; avoid JSON.parse on empty
-  return null;
 }
 
-async function sbUpsert(env, table, rows, onConflict) {
+async function sbUpsert(env, table, rows, keyCols) {
   const { url } = getSupabaseConfig(env);
-  const resp = await fetch(
+  const onConflict = Array.isArray(keyCols)
+    ? keyCols.join(",")
+    : keyCols;
+  const res = await fetch(
     `${url}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
     {
       method: "POST",
@@ -74,41 +64,39 @@ async function sbUpsert(env, table, rows, onConflict) {
       body: JSON.stringify(rows),
     }
   );
-  if (!resp.ok) {
-    console.error(`Supabase UPSERT error on ${table}:`, resp.status, await resp.text());
-    throw new Error("Supabase upsert error");
+  if (!res.ok) {
+    console.error(`Supabase upsert ${table} error`, res.status, await res.text());
   }
-  // Not using response body
-  return null;
 }
 
-async function sbUpdate(env, table, filter, patch) {
+async function sbUpdate(env, table, filterQuery, patch) {
   const { url } = getSupabaseConfig(env);
-  const resp = await fetch(`${url}/rest/v1/${table}?${filter}`, {
+  const res = await fetch(`${url}/rest/v1/${table}?${filterQuery}`, {
     method: "PATCH",
-    headers: sbHeaders(env),
+    headers: sbHeaders(env, { Prefer: "return=minimal" }),
     body: JSON.stringify(patch),
   });
-  if (!resp.ok) {
-    console.error(`Supabase UPDATE error on ${table}:`, resp.status, await resp.text());
-    throw new Error("Supabase update error");
+  if (!res.ok) {
+    console.error(`Supabase update ${table} error`, res.status, await res.text());
   }
-  // Not using response body
-  return null;
 }
 
-// ---------- WhatsApp send helpers ----------
+// ---------- WhatsApp helpers ----------
+
+function getPhoneNumberId(env) {
+  return env.PHONE_NUMBER_ID || "858272234034248"; // your real WA number ID
+}
 
 async function sendWhatsApp(env, payload) {
   const token = env.WHATSAPP_TOKEN;
-  const fromPhoneId = env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !fromPhoneId) {
-    throw new Error("Missing WHATSAPP_TOKEN or WHATSAPP_PHONE_NUMBER_ID");
+  const phoneNumberId = getPhoneNumberId(env);
+  if (!token || !phoneNumberId) {
+    console.error("Missing WHATSAPP_TOKEN or PHONE_NUMBER_ID");
+    return;
   }
 
-  const url = `https://graph.facebook.com/v17.0/${fromPhoneId}/messages`;
-
-  const resp = await fetch(url, {
+  const url = `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`;
+  const res = await fetch(url, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -117,13 +105,16 @@ async function sendWhatsApp(env, payload) {
     body: JSON.stringify(payload),
   });
 
-  if (!resp.ok) {
-    console.error("WhatsApp send error:", resp.status, await resp.text());
+  const text = await res.text();
+  if (!res.ok) {
+    console.error("[WA SEND] error", res.status, text);
+  } else {
+    console.log("[WA SEND] ok", res.status, text);
   }
 }
 
-async function sendText(env, to, body) {
-  await sendWhatsApp(env, {
+function sendText(env, to, body) {
+  return sendWhatsApp(env, {
     messaging_product: "whatsapp",
     to,
     type: "text",
@@ -131,23 +122,25 @@ async function sendText(env, to, body) {
   });
 }
 
-async function sendImage(env, to, imageUrl) {
-  await sendWhatsApp(env, {
+function sendImage(env, to, link, caption) {
+  const image = { link };
+  if (caption) image.caption = caption;
+  return sendWhatsApp(env, {
     messaging_product: "whatsapp",
     to,
     type: "image",
-    image: { link: imageUrl },
+    image,
   });
 }
 
-async function sendInteractiveButtons(env, to, body, buttons) {
-  await sendWhatsApp(env, {
+function sendInteractiveButtons(env, to, bodyText, buttons) {
+  return sendWhatsApp(env, {
     messaging_product: "whatsapp",
     to,
     type: "interactive",
     interactive: {
       type: "button",
-      body: { text: body },
+      body: { text: bodyText },
       action: {
         buttons: buttons.map((b) => ({
           type: "reply",
@@ -158,96 +151,28 @@ async function sendInteractiveButtons(env, to, body, buttons) {
   });
 }
 
-// ---------- Card image helpers ----------
+// ---------- Card URL helpers ----------
 
-function getBaseCardUrl(env) {
-  if (env.CARD_BASE_URL) return env.CARD_BASE_URL.replace(/\/+$/, "");
-  return "https://example.com/cards";
+function buildCardUrl(env, visits) {
+  const base =
+    env.CARDS_BASE_URL ||
+    "https://lhbtgjvejsnsrlstwlwl.supabase.co/storage/v1/object/public/cards";
+  const version = env.CARDS_VERSION || "v1";
+  const prefix = env.CARD_PREFIX || "Demo_Shop_";
+  const v = Math.max(
+    0,
+    Math.min(10, Number.isNaN(Number(visits)) ? 0 : Number(visits))
+  );
+  return `${base}/${version}/${prefix}${v}.png`;
 }
 
 function getZeroCardUrl(env) {
-  const base = getBaseCardUrl(env);
-  return `${base}/card-0.png`;
+  return env.STAMP_CARD_ZERO_URL || buildCardUrl(env, 0);
 }
 
-function buildCardUrl(env, stamps) {
-  const base = getBaseCardUrl(env);
-  const capped = Math.max(0, Math.min(10, stamps));
-  return `${base}/card-${capped}.png`;
-}
+// ---------- Idempotency: processed_events ----------
 
-// ---------- Conversation / state helpers ----------
-
-async function getOrCreateCustomer(env, customerId, profileName) {
-  const existing = await sbSelectOne(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "customer_id"
-  );
-  if (existing) return existing;
-
-  const now = new Date().toISOString();
-  await sbInsert(env, "customers", [
-    {
-      customer_id: customerId,
-      profile_name: profileName || null,
-      created_at: now,
-      last_seen_at: now,
-      number_of_visits: 0,
-    },
-  ]);
-  return { customer_id: customerId };
-}
-
-async function touchCustomer(env, customerId) {
-  const now = new Date().toISOString();
-  await sbUpdate(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    { last_seen_at: now }
-  );
-}
-
-async function getState(env, customerId) {
-  const row = await sbSelectOne(
-    env,
-    "conversation_state",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "active_flow,step"
-  );
-  return row || { active_flow: null, step: 0 };
-}
-
-async function setState(env, customerId, flow, step) {
-  await sbUpsert(
-    env,
-    "conversation_state",
-    [
-      {
-        customer_id: customerId,
-        active_flow: flow,
-        step,
-        updated_at: new Date().toISOString(),
-      },
-    ],
-    "customer_id"
-  );
-}
-
-async function clearState(env, customerId) {
-  await sbUpdate(
-    env,
-    "conversation_state",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    { active_flow: null, step: 0, updated_at: new Date().toISOString() }
-  );
-}
-
-// ---------- Idempotency for incoming messages ----------
-
-async function isAlreadyProcessed(env, messageId) {
+async function alreadyProcessed(env, messageId) {
   if (!messageId) return false;
   const row = await sbSelectOne(
     env,
@@ -260,12 +185,65 @@ async function isAlreadyProcessed(env, messageId) {
 
 async function markProcessed(env, messageId) {
   if (!messageId) return;
-  await sbInsert(env, "processed_events", [
-    { message_id: messageId, created_at: new Date().toISOString() },
-  ]);
+  await sbInsert(env, "processed_events", [{ message_id: messageId }]);
 }
 
-// ---------- Birthday & profile helpers ----------
+// ---------- Conversation state: conversation_state ----------
+
+async function getState(env, customerId) {
+  const row = await sbSelectOne(
+    env,
+    "conversation_state",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "active_flow,step"
+  );
+  if (!row) return { active_flow: null, step: 0 };
+  return row;
+}
+
+async function setState(env, customerId, flow, step = 0) {
+  const payload = {
+    customer_id: customerId,
+    active_flow: flow,
+    step,
+    updated_at: new Date().toISOString(),
+  };
+  await sbUpsert(env, "conversation_state", [payload], "customer_id");
+}
+
+async function clearState(env, customerId) {
+  await setState(env, customerId, null, 0);
+}
+
+// ---------- Customers table helpers ----------
+
+async function upsertCustomer(env, customerId, profileName) {
+  const now = new Date().toISOString();
+  const existing = await sbSelectOne(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "customer_id"
+  );
+
+  if (existing) {
+    await sbUpdate(
+      env,
+      "customers",
+      `customer_id=eq.${encodeURIComponent(customerId)}`,
+      { last_seen_at: now, profile_name: profileName }
+    );
+  } else {
+    await sbInsert(env, "customers", [
+      {
+        customer_id: customerId,
+        profile_name: profileName,
+        created_at: now,
+        last_seen_at: now,
+      },
+    ]);
+  }
+}
 
 async function setCustomerBirthday(env, customerId, birthdayIso) {
   await sbUpdate(
@@ -285,44 +263,33 @@ async function setCustomerPreferredDrink(env, customerId, drink) {
   );
 }
 
-async function resetCustomerVisits(env, customerId) {
-  await sbUpdate(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    { number_of_visits: 0, last_visit_at: null }
-  );
-}
-
 // ---------- Birthday parsing ----------
 
-function parseBirthday(text) {
-  const t = text.trim();
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
-  if (!m) return null;
-  const y = m[1];
-  const mo = m[2];
-  const d = m[3];
-  const year = Number(y);
-  const month = Number(mo);
-  const day = Number(d);
-  if (year < 1900 || year > 2100) return null;
-  if (month < 1 || month > 12) return null;
-  if (day < 1 || day > 31) return null;
-  return `${y}-${mo}-${d}`;
+function parseBirthday(raw) {
+  if (!raw) return null;
+  const s = raw.trim();
+
+  // YYYY-MM-DD
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return s;
+
+  // DD/MM/YYYY or DD-MM-YYYY -> ISO
+  m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
+  }
+
+  return null;
 }
 
 // ---------- SIGNUP flow ----------
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Welcome${waName ? ", " + waName : ""} 👋
-` +
-    "2 quick steps to join the stamp card:
-
-" +
-    "1️⃣ When is your birthday? (e.g. 1995-07-12)
-" +
+    `Welcome${waName ? ", " + waName : ""} 👋\n` +
+    "2 quick steps to join the stamp card:\n\n" +
+    "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
     "_You get a free drink on your birthday._";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
@@ -374,147 +341,11 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️
-Type *STAMP* to claim your first stamp."
+    "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
   );
 
   await setState(env, customerId, "demo_stamp", 1);
   return true;
-}
-
-// ---------- Meeting (MEET) flow ----------
-
-async function logMeetingResponse(env, customerId, waName, kind, answer) {
-  const now = new Date().toISOString();
-  const row = {
-    customer_id: customerId,
-    wa_name: waName || null,
-    whatsapp_number: customerId,
-    kind,
-    answer,
-    created_at: now,
-  };
-  await sbInsert(env, "responses", [row]);
-}
-
-async function startMeetFlow(env, customerId, waName) {
-  const greeting =
-    `Awesome${waName ? " " + waName : ""}! 👋
-
-` +
-    "Which bespoke service are you interested in?";
-  await sendInteractiveButtons(env, customerId, greeting, [
-    { id: "meet_meta", title: "Meta" },
-    { id: "meet_apps", title: "Apps" },
-    { id: "meet_strategy", title: "Strategy" },
-  ]);
-  await setState(env, customerId, "meet", 1);
-}
-
-async function handleMeetInteractiveStep(env, customerId, waName, replyId) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "meet" || st.step !== 1) return false;
-
-  const map = {
-    meet_meta: "Meta",
-    meet_apps: "Apps",
-    meet_strategy: "Strategy",
-  };
-  const service = map[replyId];
-  if (!service) return false;
-
-  await logMeetingResponse(env, customerId, waName, "meeting_service", service);
-
-  await sendText(
-    env,
-    customerId,
-    "Thanks! 🙌
-
-Please respond with a *day + time* that suits you best for a chat."
-  );
-
-  await setState(env, customerId, "meet", 2);
-  return true;
-}
-
-async function handleMeetTextStep2(env, customerId, waName, text) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "meet" || st.step !== 2) return false;
-
-  await logMeetingResponse(env, customerId, waName, "meeting_time", text);
-
-  await sendText(
-    env,
-    customerId,
-    "All set ✅
-
-We’ve received your meeting request and will get back to you soon!
-
-" +
-      "Please feel free to reply here with any extra info or context for our chat."
-  );
-
-  await clearState(env, customerId);
-  return true;
-}
-
-// ---------- STREAK helpers ----------
-
-function getTodayDateString() {
-  // Use UTC date portion for consistent streak calculation
-  return new Date().toISOString().slice(0, 10);
-}
-
-async function updateCustomerStreak(env, customerId) {
-  const today = getTodayDateString();
-
-  const row = await sbSelectOne(
-    env,
-    "customer_streaks",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "customer_id,streak_days,last_day"
-  );
-
-  let prevStreak = 0;
-  let newStreak = 1;
-
-  if (row) {
-    prevStreak = row.streak_days ? Number(row.streak_days) : 0;
-    const lastDayStr = row.last_day;
-    if (lastDayStr) {
-      const last = new Date(`${lastDayStr}T00:00:00Z`);
-      const todayDate = new Date(`${today}T00:00:00Z`);
-      const diffDays = Math.round(
-        (todayDate.getTime() - last.getTime()) / (24 * 60 * 60 * 1000)
-      );
-
-      if (diffDays === 0) {
-        // Same calendar day – keep the current streak
-        newStreak = prevStreak || 1;
-      } else if (diffDays === 1) {
-        // Consecutive day – increment
-        newStreak = prevStreak + 1;
-      } else {
-        // Gap – reset streak
-        newStreak = 1;
-      }
-    }
-  }
-
-  await sbUpsert(
-    env,
-    "customer_streaks",
-    [
-      {
-        customer_id: customerId,
-        streak_days: newStreak,
-        last_day: today,
-      },
-    ],
-    "customer_id"
-  );
-
-  return { prevStreak, newStreak };
 }
 
 // ---------- STAMP handling ----------
@@ -559,55 +390,14 @@ async function handleStamp(env, customerId, token) {
     "customer_id"
   );
 
-  // Update streak and fire any milestone messages once
-  const { prevStreak, newStreak } = await updateCustomerStreak(env, customerId);
-
   const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
 
-  // Base confirmation
   await sendText(
     env,
     customerId,
-    "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card."
-  );
-
-  // Streak milestone: first time reaching 2-in-a-row (but less than 5)
-  if (prevStreak < 2 && newStreak >= 2 && newStreak < 5) {
-    await sendText(
-      env,
-      customerId,
-      "🔥 You’re on a streak!
-
-" +
-        `That’s *${newStreak} visits in a row*.
-
-` +
-        "Keep it going — hit a streak of *5* visits and you’ll earn *extra stamps* on your card. 💪"
-    );
-  }
-
-  // Streak milestone: first time reaching 5-in-a-row
-  if (prevStreak < 5 && newStreak >= 5) {
-    await sendText(
-      env,
-      customerId,
-      "🎉 Streak unlocked!
-
-You’ve hit a *5-visit streak* — you’ve earned *double stamps* on this visit. 🙌"
-    );
-  }
-
-  // Close out the demo
-  await sendText(
-    env,
-    customerId,
-    "🎉 *Demo complete.*
-
-" +
-      "Reply *SIGNUP* to restart, or share this demo with your team:
-" +
-      "https://wa.me/84764929881?text=DEMO"
+    "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.\n\n" +
+      "🎉 *Demo complete.* Reply *SIGNUP* to restart or share this with your team."
   );
 
   await setState(env, customerId, "demo_complete", 0);
@@ -616,86 +406,61 @@ You’ve hit a *5-visit streak* — you’ve earned *double stamps* on this visi
 
 // ---------- GET: webhook verification ----------
 
-function verifyWhatsAppToken(env, url) {
-  const token = env.WHATSAPP_VERIFY_TOKEN;
-  if (!token) {
-    console.warn("No WHATSAPP_VERIFY_TOKEN set");
-  }
-  const { searchParams } = new URL(url);
+export async function onRequestGet({ request, env }) {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
 
-  const mode = searchParams.get("hub.mode");
-  const challenge = searchParams.get("hub.challenge");
-  const verifyToken = searchParams.get("hub.verify_token");
+  const verifyToken =
+    env.VERIFY_TOKEN || env.WHATSAPP_VERIFY_TOKEN || "myverifytoken";
 
-  if (mode === "subscribe" && challenge && verifyToken === token) {
-    return new Response(challenge, { status: 200 });
+  if (mode === "subscribe" && token === verifyToken) {
+    return new Response(challenge || "", { status: 200 });
   }
   return new Response("forbidden", { status: 403 });
 }
 
-// ---------- Cloudflare Pages export ----------
+// ---------- POST: handle incoming WhatsApp messages ----------
 
-export const onRequestPost = async (context) => {
-  const { request, env } = context;
-
+export async function onRequestPost({ request, env }) {
   try {
-    let json;
-    try {
-      json = await request.json();
-    } catch (err) {
-      console.error("JSON parse failed:", err);
-      return new Response("ok", { status: 200 });
-    }
+    const data = await request.json();
 
-    console.log("Incoming webhook:", JSON.stringify(json, null, 2));
+    const entry = data.entry?.[0] || {};
+    const changes = entry.changes?.[0] || {};
+    const value = changes.value || {};
+    const message = value.messages?.[0];
 
-    if (json.object !== "whatsapp_business_account") {
-      return new Response("ok", { status: 200 });
-    }
+    if (!message) return new Response("ignored", { status: 200 });
 
-    const entry = json.entry && json.entry[0];
-    const change = entry && entry.changes && entry.changes[0];
-    const value = change && change.value;
-    const messages = (value && value.messages) || [];
-    if (!messages.length) {
-      return new Response("ok", { status: 200 });
-    }
-
-    const message = messages[0];
-    const from = message.from; // WhatsApp user ID (phone)
     const msgId = message.id;
-    const type = message.type;
+    const from = message.from;
+    const contacts = value.contacts || [];
+    const waName = contacts[0]?.profile?.name || null;
 
-    const contactProfile =
-      value && value.contacts && value.contacts[0] && value.contacts[0].profile;
-    const waName = contactProfile && contactProfile.name ? contactProfile.name : null;
-
-    await getOrCreateCustomer(env, from, waName);
-    await touchCustomer(env, from);
-
-    if (await isAlreadyProcessed(env, msgId)) {
-      console.log("Duplicate message, ignoring:", msgId);
+    // idempotency
+    if (await alreadyProcessed(env, msgId)) {
       return new Response("ok", { status: 200 });
     }
     await markProcessed(env, msgId);
 
-    // Interactive: buttons & lists
+    await upsertCustomer(env, from, waName);
+
+    const type = message.type;
+
+    // Interactive: drink selection
     if (type === "interactive") {
       const interactive = message.interactive || {};
       let replyId = null;
       if (interactive.type === "button_reply") {
-        replyId = interactive.button_reply && interactive.button_reply.id;
+        replyId = interactive.button_reply?.id;
       } else if (interactive.type === "list_reply") {
-        replyId = interactive.list_reply && interactive.list_reply.id;
+        replyId = interactive.list_reply?.id;
       }
 
-      if (replyId) {
-        if (await handleSignupInteractiveStep2(env, from, replyId)) {
-          return new Response("ok", { status: 200 });
-        }
-        if (await handleMeetInteractiveStep(env, from, waName, replyId)) {
-          return new Response("ok", { status: 200 });
-        }
+      if (replyId && (await handleSignupInteractiveStep2(env, from, replyId))) {
+        return new Response("ok", { status: 200 });
       }
 
       return new Response("ok", { status: 200 });
@@ -703,59 +468,21 @@ export const onRequestPost = async (context) => {
 
     // Text messages
     if (type === "text") {
-      const raw = (message.text && message.text.body ? message.text.body : "").trim();
+      const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
 
-      // CONNECT: simple router to MEET or DEMO
-      if (token === "CONNECT") {
-        const namePart = waName ? ` ${waName}` : "";
-        await sendText(
-          env,
-          from,
-          `Hey${namePart} 👋
-
-` +
-            "Thanks for connecting! 🙌
-
-" +
-            "Reply:
-" +
-            "• *MEET* to book a meeting
-" +
-            "• *DEMO* if you'd like to test out the WhatsApp stamp card."
-        );
-        return new Response("ok", { status: 200 });
-      }
-
-      // MEET: start meeting flow with buttons
-      if (token === "MEET") {
-        await startMeetFlow(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-
-      // DEMO / SIGNUP: start or restart the sign-up flow
-      if (token === "SIGNUP") {
-        // Reset visits for a fresh demo experience
-        await resetCustomerVisits(env, from);
-        await startSignupFlow(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-      if (token === "DEMO") {
+      // Start demo/sign-up
+      if (token === "DEMO" || token === "SIGNUP") {
         await startSignupFlow(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
-      // Meeting flow step 2: collect day + time preference
-      if (await handleMeetTextStep2(env, from, waName, raw)) {
-        return new Response("ok", { status: 200 });
-      }
-
-      // Birthday step in SIGNUP flow
+      // Birthday step
       if (await handleSignupTextStep1(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
-      // STAMP: award stamp (and streak logic)
+      // Stamp
       if (token === "STAMP") {
         await handleStamp(env, from, token);
         return new Response("ok", { status: 200 });
@@ -765,9 +492,8 @@ export const onRequestPost = async (context) => {
       await sendText(
         env,
         from,
-        "👋 Welcome to the WhatsApp stamp card demo.
-" +
-          "Send *CONNECT* to see options, *DEMO* or *SIGNUP* to start, or *STAMP* after a visit."
+        "👋 Welcome to the WhatsApp stamp card demo.\n" +
+          "Send *DEMO* or *SIGNUP* to start, or *STAMP* after a visit."
       );
       return new Response("ok", { status: 200 });
     }
@@ -777,9 +503,4 @@ export const onRequestPost = async (context) => {
 
   // Always 200 so Meta doesn't retry endlessly
   return new Response("ok", { status: 200 });
-};
-
-export const onRequestGet = async (context) => {
-  const { request, env } = context;
-  return verifyWhatsAppToken(env, request.url);
-};
+}
