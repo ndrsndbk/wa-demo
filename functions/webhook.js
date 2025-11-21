@@ -367,7 +367,7 @@ function parseBirthday(raw) {
   const s = raw.trim();
 
   // Keep legacy ISO parsing but allow any free-text; caller can ignore null.
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
   if (m) return s;
 
   return null;
@@ -377,10 +377,10 @@ function parseBirthday(raw) {
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Hey${waName ? ", " + waName : ""}! 👋\n\n` +
-    "Want to see how the stamp card works?\n" +
-    "Share your birthday in any format.\n\n" +
-    "You’ll get a free drink on your day 🎂🥳";
+    `Hey${waName ? ", " + waName : ""}! 👋\\n\\n` +
+    "First, when’s your birthday?\\n" +
+    "e.g. 1993-02-07\\n\\n" +
+    "_(you get a free drink on your birthday)_";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
 }
@@ -393,7 +393,7 @@ async function handleSignupTextStep1(env, customerId, text) {
   const birthdayValue = iso || text.trim();
   await setCustomerBirthday(env, customerId, birthdayValue);
 
-  await sendInteractiveButtons(env, customerId, "2️⃣ Choose your go-to drink:", [
+  await sendInteractiveButtons(env, customerId, "Which drink do you prefer?", [
     { id: "drink_matcha", title: "Matcha" },
     { id: "drink_americano", title: "Americano" },
     { id: "drink_cappuccino", title: "Cappuccino" },
@@ -407,21 +407,25 @@ async function handleSignupTextStep1(env, customerId, text) {
 
 function buildShareLink(env) {
   if (env.SHARE_LINK) return env.SHARE_LINK;
-  return "https://wa.me/?text=Check%20out%20this%20WhatsApp%20demo";
+  return "https://wa.me/84764929881?text=DEMO";
 }
 
 function getWebsiteUrl(env) {
-  return env.WEBSITE_URL || "https://www.whiteprompt.com";
+  return env.WEBSITE_URL || "https://www.thepotentialcompany.com";
 }
 
 function getDashboardUrl(env) {
-  return env.DASHBOARD_URL || env.REPORT_URL || "https://demo.whiteprompt.com/dashboard";
+  return (
+    env.DASHBOARD_URL ||
+    env.REPORT_URL ||
+    "https://ndrsndbk.github.io/stamp-card-dashboard/"
+  );
 }
 
 async function sendConnectMenu(env, to, waName) {
   const body =
-    `Hi${waName ? " " + waName : ""}! 🤝\n\n` +
-    "Thanks for stopping by.\n" +
+    `Hi${waName ? " " + waName : ""}! 🤝\\n\\n` +
+    "Thanks for connecting.\\n\\n" +
     "What would you like to explore?";
 
   await sendInteractiveButtons(env, to, body, [
@@ -444,7 +448,57 @@ async function startMeetingFlow(env, customerId) {
   await setState(env, customerId, "meeting", 1);
 }
 
-async function handleMeetingServiceReply(env, customerId, replyId) {
+async function logMeetingSelection(env, customerId, waName, selected) {
+  const now = new Date().toISOString();
+  await sbInsert(env, "meeting_requests", [
+    {
+      customer_id: customerId,
+      wa_name: waName || null,
+      service_selected: selected,
+      status: "service_selected",
+      created_at: now,
+      updated_at: now,
+    },
+  ]);
+}
+
+async function getLatestMeetingRequest(env, customerId) {
+  return await sbSelectOne(
+    env,
+    "meeting_requests",
+    `customer_id=eq.${encodeURIComponent(customerId)}&status=eq.${encodeURIComponent(
+      "service_selected"
+    )}&order=created_at.desc`,
+    "id"
+  );
+}
+
+async function updateMeetingRequestTime(env, customerId, rawText) {
+  const latest = await getLatestMeetingRequest(env, customerId);
+  const now = new Date().toISOString();
+
+  if (latest?.id) {
+    await sbUpdate(
+      env,
+      "meeting_requests",
+      `id=eq.${encodeURIComponent(latest.id)}`,
+      { requested_time_text: rawText, status: "time_proposed", updated_at: now }
+    );
+    return;
+  }
+
+  await sbInsert(env, "meeting_requests", [
+    {
+      customer_id: customerId,
+      requested_time_text: rawText,
+      status: "time_proposed",
+      created_at: now,
+      updated_at: now,
+    },
+  ]);
+}
+
+async function handleMeetingServiceReply(env, customerId, replyId, waName) {
   const st = await getState(env, customerId);
   if (st.active_flow !== "meeting" || st.step !== 1) return false;
 
@@ -456,10 +510,12 @@ async function handleMeetingServiceReply(env, customerId, replyId) {
   const selected = map[replyId];
   if (!selected) return false;
 
+  await logMeetingSelection(env, customerId, waName, selected);
+
   await sendText(
     env,
     customerId,
-    `Great choice! We’ll focus on *${selected}*.\n\n` +
+    `Great choice! We’ll focus on *${selected}*.\\n\\n` +
       "Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)"
   );
 
@@ -479,10 +535,12 @@ async function handleMeetingTimeText(env, customerId, rawText) {
   };
   const selected = map[serviceKey] || "our services";
 
+  await updateMeetingRequestTime(env, customerId, rawText);
+
   await sendText(
     env,
     customerId,
-    `Nice! We’ll pencil in *${rawText}* for *${selected}*.\n\n` +
+    `Nice! We’ll pencil in *${rawText}* for *${selected}*.\\n\\n` +
       `We’ll confirm via email soon. More here: ${getWebsiteUrl(env)}`
   );
 
@@ -491,12 +549,18 @@ async function handleMeetingTimeText(env, customerId, rawText) {
 }
 
 async function startDemoFlow(env, customerId, waName) {
-  await startSignupFlow(env, customerId, waName);
+  const intro =
+    `Hey${waName ? " " + waName : ""}! 👋\\n\\n` +
+    "Ready to test the stamp card?\\n\\n" +
+    "Imagine a customer scanned a QR and got sent this message.\\n\\n" +
+    "Simply respond *SIGN UP* to begin.";
+  await sendText(env, customerId, intro);
+  await setState(env, customerId, "demo_intro", 0);
 }
 
 async function sendMoreMenu(env, customerId) {
   const body =
-    "Want to try more features?\n\n" +
+    "Want to try more features?\\n\\n" +
     "Pick an option:";
   await sendInteractiveButtons(env, customerId, body, [
     { id: "more_streak", title: "STREAK" },
@@ -509,21 +573,20 @@ async function sendDashboardLink(env, customerId) {
   await sendText(
     env,
     customerId,
-    `Here’s the dashboard link:\n${getDashboardUrl(env)}\n\n` +
+    `Here’s the dashboard link:\\n${getDashboardUrl(env)}\\n\\n` +
       "It updates in real-time during the demo."
   );
 }
 
 async function handleStreakCommand(env, customerId) {
-  const updated = await updateStreak(env, customerId);
-  await maybeSendStreakMilestones(env, customerId, updated.streak, updated);
-
   await sendText(
     env,
     customerId,
-    `Logging today. You’re on a *${updated.streak}-day* streak now! 🔥`
+    "Let’s test streak gamification 🔥\\n\\n" +
+      "A streak means visiting multiple days in a row.\\n\\n" +
+      "Send *STAMP* to make another “purchase”."
   );
-  await clearState(env, customerId);
+  await setState(env, customerId, "demo_streak", 1);
 }
 
 async function handleSignupInteractiveStep2(env, customerId, replyId) {
@@ -546,7 +609,7 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️\nType *STAMP* to claim your first stamp."
+    "Now imagine you’ve just bought a coffee ☕️\\n\\nRespond *STAMP* to claim your first stamp."
   );
 
   await setState(env, customerId, "demo_stamp", 1);
@@ -557,7 +620,11 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
 
 async function handleStamp(env, customerId, token) {
   const st = await getState(env, customerId);
-  if (st.active_flow !== "demo_stamp" || st.step !== 1) {
+  const inDemoStamp = st.active_flow === "demo_stamp" && st.step === 1;
+  const inDemoAfterFirst = st.active_flow === "demo_after_first_stamp";
+  const inDemoStreak = st.active_flow === "demo_streak";
+
+  if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
     // allow STAMP even outside strict state for demo
     if (token !== "STAMP") return false;
   }
@@ -595,18 +662,57 @@ async function handleStamp(env, customerId, token) {
     "customer_id"
   );
 
-  const streakUpdate = await updateStreak(env, customerId);
-  await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
+  if (!inDemoStreak) {
+    const streakUpdate = await updateStreak(env, customerId);
+    await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
+  }
 
   const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
 
   const shareLink = buildShareLink(env);
+  if (inDemoStreak) {
+    if (next === 2) {
+      await sendText(
+        env,
+        customerId,
+        "Wow — you’re on a *2-day streak* 🙌\\n\\nHit a *5-day streak* to unlock double stamps 🔥\\n\\nWrite *STAMP* three more times to reach day 5."
+      );
+      await setState(env, customerId, "demo_streak", 2);
+    } else if (next === 3 || next === 4) {
+      await sendText(env, customerId, "Nice! Keep going — send *STAMP* again.");
+      await setState(env, customerId, "demo_streak", next);
+    } else if (next >= 5) {
+      await sendText(
+        env,
+        customerId,
+        "Great — you’ve unlocked *double stamps*! 🎉🔥\\n\\nWell done."
+      );
+      await sendText(
+        env,
+        customerId,
+        `🎉 *Demo complete.*\\nShare it with colleagues:\\n${shareLink}\\n\\nWant to test more features? Reply *MORE*.`
+      );
+      await setState(env, customerId, "demo_complete", 0);
+    }
+    return true;
+  }
+
+  if (next === 1) {
+    await sendText(
+      env,
+      customerId,
+      "Thanks for visiting 🙌\\n\\nNow you’ve got your first stamp.\\n\\nWant to test more features? Reply *MORE*."
+    );
+    await setState(env, customerId, "demo_after_first_stamp", 1);
+    return true;
+  }
+
   await sendText(
     env,
     customerId,
-    "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.\n\n" +
-      `🎉 *Demo complete.* Share it with colleagues: ${shareLink}\n\n` +
+    "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.\\n\\n" +
+      `🎉 *Demo complete.* Share it with colleagues:\\n${shareLink}\\n\\n` +
       "Want to test more features? Reply *MORE*."
   );
 
@@ -637,8 +743,6 @@ export async function onRequestPost({ request, env }) {
   try {
     const data = await request.json();
 
-    console.log("RAW WEBHOOK:", JSON.stringify(data));
-
     const entry = data.entry?.[0] || {};
     const changes = entry.changes?.[0] || {};
     const value = changes.value || {};
@@ -646,7 +750,6 @@ export async function onRequestPost({ request, env }) {
 
     if (!message) {
       // Likely a status/update webhook without inbound user message
-      console.log("No inbound message in payload. Keys:", Object.keys(value || {}));
       return new Response("ignored", { status: 200 });
     }
 
@@ -685,7 +788,7 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
-      if (replyId && (await handleMeetingServiceReply(env, from, replyId))) {
+      if (replyId && (await handleMeetingServiceReply(env, from, replyId, waName))) {
         return new Response("ok", { status: 200 });
       }
 
@@ -712,6 +815,18 @@ export async function onRequestPost({ request, env }) {
       const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
 
+      if (token === "SIGNUP" || token === "SIGN UP") {
+        await resetVisitCount(env, from);
+        await clearState(env, from);
+        await startSignupFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "DEMO") {
+        await startDemoFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
       // Meeting availability reply
       if (await handleMeetingTimeText(env, from, raw)) {
         return new Response("ok", { status: 200 });
@@ -726,15 +841,6 @@ export async function onRequestPost({ request, env }) {
       // Meeting branch
       if (token === "MEETING") {
         await startMeetingFlow(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      // Start demo/sign-up
-      if (token === "DEMO" || token === "SIGNUP" || token === "SIGN UP") {
-        if (token === "SIGNUP" || token === "SIGN UP") {
-          await resetVisitCount(env, from);
-        }
-        await startSignupFlow(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
@@ -769,7 +875,7 @@ export async function onRequestPost({ request, env }) {
       await sendText(
         env,
         from,
-        "👋 Welcome to the WhatsApp stamp card demo.\n\n" +
+        "👋 Welcome to the WhatsApp stamp card demo.\\n\\n" +
           "Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit."
       );
       return new Response("ok", { status: 200 });
