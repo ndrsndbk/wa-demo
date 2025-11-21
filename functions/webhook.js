@@ -429,7 +429,7 @@ function buildShareLink(env) {
 }
 
 function getWebsiteUrl(env) {
-  return env.WEBSITE_URL || "https://www.thepotentialcompany.com";
+  return env.WEBSITE_URL || "https://thepotentialcompany.com";
 }
 
 function getDashboardUrl(env) {
