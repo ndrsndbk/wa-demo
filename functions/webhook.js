@@ -445,7 +445,7 @@ async function sendConnectMenu(env, to, waName) {
 
 Thanks for connecting.
 
-What would you like to explore?`;
+Would you like to book a meeting or try a demo?`;
 
   await sendInteractiveButtons(env, to, body, [
     { id: "connect_meeting", title: "MEETING" },
@@ -460,8 +460,8 @@ async function startMeetingFlow(env, customerId) {
     "Which bespoke service are you most interested in?",
     [
       { id: "meeting_meta", title: "META SYSTEMS" },
-      { id: "meeting_apps", title: "APPS & AUTO" },
-      { id: "meeting_advisory", title: "STRAT ADVISORY" },
+      { id: "meeting_apps", title: "APPs & AUTOs" },
+      { id: "meeting_advisory", title: "STRATEGIC ADVISORY" },
     ]
   );
   await setState(env, customerId, "meeting", 1);
@@ -534,7 +534,7 @@ async function handleMeetingServiceReply(env, customerId, replyId, waName) {
   await sendText(
     env,
     customerId,
-    `Great choice! We’ll focus on *${selected}*.
+    `Awesome! We’ll focus on *${selected}*.
 
 Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)`
   );
@@ -562,7 +562,9 @@ async function handleMeetingTimeText(env, customerId, rawText) {
     customerId,
     `Nice! We’ll pencil in *${rawText}* for *${selected}*.
 
-We’ll confirm via email soon. More here: ${getWebsiteUrl(env)}`
+We’ll reachout to confirm more details soon. 
+
+More content about us is here: ${getWebsiteUrl(env)}`
   );
 
   await clearState(env, customerId);
@@ -575,8 +577,10 @@ async function startDemoFlow(env, customerId, waName) {
 Ready to test the stamp card?
 
 Imagine a customer walks into a coffee shop and scans a QR.
+
 Then they get sent this message 👇
-Simply send signup to get your stamp card.`;
+
+Simply send *SIGNUP* to get your stamp card.`;
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
 }
@@ -585,6 +589,7 @@ async function sendMoreMenu(env, customerId) {
   const body = `Want to try more features? Pick an option:
 
 🔥 Reply *STREAK* to test gamification.
+
 📊 Reply *DASH* to see the manager dashboard.`;
   await sendInteractiveButtons(env, customerId, body, [
     { id: "more_streak", title: "STREAK" },
@@ -600,7 +605,9 @@ async function sendDashboardLink(env, customerId) {
     `Here’s the dashboard link:
 ${getDashboardUrl(env)}
 
-It updates in real-time during the demo.`
+It updates in real-time during the demo.
+
+More content about us is here: ${getWebsiteUrl(env)}`
   );
 }
 
@@ -608,7 +615,7 @@ async function handleStreakCommand(env, customerId) {
   await sendText(
     env,
     customerId,
-    `Let’s test streak gamification 🔥
+    `Let’s test streak gamification 🔥 
 
 A streak means visiting multiple days in a row.
 
@@ -719,7 +726,8 @@ Well done.`
 Share it with colleagues:
 ${shareLink}
 
-Want to test more features? Reply *MORE*.`
+Want to test more features?
+Reply *MORE*.`
       );
       await setState(env, customerId, "demo_complete", 0);
       return true;
@@ -735,7 +743,9 @@ Want to test more features? Reply *MORE*.`
 
 Hit a *5-day streak* to unlock double stamps 🔥
 
-Write *STAMP* three more times to reach day 5.`
+Send *STAMP* three more times to reach day 5.
+
+_(Reply with stamp, hit send, repeat x3)_`
       );
       await setState(env, customerId, "demo_streak", 2);
     } else if (next === 3 || next === 4) {
@@ -767,10 +777,14 @@ Want to test more features? Reply *MORE*.`
     customerId,
     `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
 
-🎉 *Demo complete.* Share it with colleagues:
+🎉 *Demo complete.* 
+
+Share it with colleagues:
 ${shareLink}
 
-Want to test more features? Reply *MORE*.`
+Want to test more features? 
+
+Reply *MORE*.`
   );
 
   await setState(env, customerId, "demo_complete", 0);
