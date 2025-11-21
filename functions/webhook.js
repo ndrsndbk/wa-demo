@@ -273,6 +273,23 @@ async function resetVisitCount(env, customerId) {
   );
 }
 
+async function resetStreakState(env, customerId) {
+  await sbUpsert(
+    env,
+    "customer_streaks",
+    [
+      {
+        customer_id: customerId,
+        streak_count: 0,
+        last_visit_date: null,
+        two_day_sent: false,
+        five_day_sent: false,
+      },
+    ],
+    "customer_id"
+  );
+}
+
 // ---------- Streak helpers ----------
 
 function getTodayIsoDate() {
@@ -367,7 +384,7 @@ function parseBirthday(raw) {
   const s = raw.trim();
 
   // Keep legacy ISO parsing but allow any free-text; caller can ignore null.
-  const m = s.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return s;
 
   return null;
@@ -376,11 +393,12 @@ function parseBirthday(raw) {
 // ---------- SIGNUP flow ----------
 
 async function startSignupFlow(env, customerId, waName) {
-  const msg =
-    `Hey${waName ? ", " + waName : ""}! 👋\\n\\n` +
-    "First, when’s your birthday?\\n" +
-    "e.g. 1993-02-07\\n\\n" +
-    "_(you get a free drink on your birthday)_";
+  const msg = `Hey${waName ? `, ${waName}` : ""}! 👋
+
+First, when’s your birthday?
+e.g. 1993-02-07
+
+_(you get a free drink on your birthday)_`;
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
 }
@@ -423,10 +441,11 @@ function getDashboardUrl(env) {
 }
 
 async function sendConnectMenu(env, to, waName) {
-  const body =
-    `Hi${waName ? " " + waName : ""}! 🤝\\n\\n` +
-    "Thanks for connecting.\\n\\n" +
-    "What would you like to explore?";
+  const body = `Hi${waName ? ` ${waName}` : ""}! 🤝
+
+Thanks for connecting.
+
+What would you like to explore?`;
 
   await sendInteractiveButtons(env, to, body, [
     { id: "connect_meeting", title: "MEETING" },
@@ -515,8 +534,9 @@ async function handleMeetingServiceReply(env, customerId, replyId, waName) {
   await sendText(
     env,
     customerId,
-    `Great choice! We’ll focus on *${selected}*.\\n\\n` +
-      "Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)"
+    `Great choice! We’ll focus on *${selected}*.
+
+Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)`
   );
 
   await setState(env, customerId, `meeting_${replyId}`, 2);
@@ -529,9 +549,9 @@ async function handleMeetingTimeText(env, customerId, rawText) {
 
   const serviceKey = st.active_flow.replace("meeting_", "");
   const map = {
-    meeting_meta: "Meta Systems",
-    meeting_apps: "Applications / Automation",
-    meeting_advisory: "Strategic Advisory",
+    meta: "Meta Systems",
+    apps: "Applications / Automation",
+    advisory: "Strategic Advisory",
   };
   const selected = map[serviceKey] || "our services";
 
@@ -540,8 +560,9 @@ async function handleMeetingTimeText(env, customerId, rawText) {
   await sendText(
     env,
     customerId,
-    `Nice! We’ll pencil in *${rawText}* for *${selected}*.\\n\\n` +
-      `We’ll confirm via email soon. More here: ${getWebsiteUrl(env)}`
+    `Nice! We’ll pencil in *${rawText}* for *${selected}*.
+
+We’ll confirm via email soon. More here: ${getWebsiteUrl(env)}`
   );
 
   await clearState(env, customerId);
@@ -549,19 +570,22 @@ async function handleMeetingTimeText(env, customerId, rawText) {
 }
 
 async function startDemoFlow(env, customerId, waName) {
-  const intro =
-    `Hey${waName ? " " + waName : ""}! 👋\\n\\n` +
-    "Ready to test the stamp card?\\n\\n" +
-    "Imagine a customer scanned a QR and got sent this message.\\n\\n" +
-    "Simply respond *SIGN UP* to begin.";
+  const intro = `Hey${waName ? ` ${waName}` : ""}! 👋
+
+Ready to test the stamp card?
+
+Imagine a customer walks into a coffee shop and scans a QR.
+Then they get sent this message 👇
+Simply send signup to get your stamp card.`;
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
 }
 
 async function sendMoreMenu(env, customerId) {
-  const body =
-    "Want to try more features?\\n\\n" +
-    "Pick an option:";
+  const body = `Want to try more features? Pick an option:
+
+🔥 Reply *STREAK* to test gamification.
+📊 Reply *DASH* to see the manager dashboard.`;
   await sendInteractiveButtons(env, customerId, body, [
     { id: "more_streak", title: "STREAK" },
     { id: "more_dash", title: "DASH" },
@@ -573,8 +597,10 @@ async function sendDashboardLink(env, customerId) {
   await sendText(
     env,
     customerId,
-    `Here’s the dashboard link:\\n${getDashboardUrl(env)}\\n\\n` +
-      "It updates in real-time during the demo."
+    `Here’s the dashboard link:
+${getDashboardUrl(env)}
+
+It updates in real-time during the demo.`
   );
 }
 
@@ -582,9 +608,11 @@ async function handleStreakCommand(env, customerId) {
   await sendText(
     env,
     customerId,
-    "Let’s test streak gamification 🔥\\n\\n" +
-      "A streak means visiting multiple days in a row.\\n\\n" +
-      "Send *STAMP* to make another “purchase”."
+    `Let’s test streak gamification 🔥
+
+A streak means visiting multiple days in a row.
+
+Send *STAMP* to make another “purchase”.`
   );
   await setState(env, customerId, "demo_streak", 1);
 }
@@ -609,7 +637,9 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
   await sendText(
     env,
     customerId,
-    "Now imagine you’ve just bought a coffee ☕️\\n\\nRespond *STAMP* to claim your first stamp."
+    `Now imagine you’ve just bought a coffee ☕️
+
+Respond *STAMP* to claim your first stamp.`
   );
 
   await setState(env, customerId, "demo_stamp", 1);
@@ -667,42 +697,66 @@ async function handleStamp(env, customerId, token) {
     await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
   }
 
-  const capped = Math.max(1, Math.min(10, next));
-  await sendImage(env, customerId, buildCardUrl(env, capped));
-
   const shareLink = buildShareLink(env);
+
   if (inDemoStreak) {
+    const capped = Math.max(1, Math.min(10, next));
+
+    if (next === 5) {
+      await sendText(
+        env,
+        customerId,
+        `Great — you’ve unlocked *double stamps*! 🎉🔥
+
+Well done.`
+      );
+      const streakCardVisits = Math.min(10, next + 1);
+      await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
+      await sendText(
+        env,
+        customerId,
+        `🎉 *Demo complete.*
+Share it with colleagues:
+${shareLink}
+
+Want to test more features? Reply *MORE*.`
+      );
+      await setState(env, customerId, "demo_complete", 0);
+      return true;
+    }
+
+    await sendImage(env, customerId, buildCardUrl(env, capped));
+
     if (next === 2) {
       await sendText(
         env,
         customerId,
-        "Wow — you’re on a *2-day streak* 🙌\\n\\nHit a *5-day streak* to unlock double stamps 🔥\\n\\nWrite *STAMP* three more times to reach day 5."
+        `Wow — you’re on a *2-day streak* 🙌
+
+Hit a *5-day streak* to unlock double stamps 🔥
+
+Write *STAMP* three more times to reach day 5.`
       );
       await setState(env, customerId, "demo_streak", 2);
     } else if (next === 3 || next === 4) {
       await sendText(env, customerId, "Nice! Keep going — send *STAMP* again.");
       await setState(env, customerId, "demo_streak", next);
-    } else if (next >= 5) {
-      await sendText(
-        env,
-        customerId,
-        "Great — you’ve unlocked *double stamps*! 🎉🔥\\n\\nWell done."
-      );
-      await sendText(
-        env,
-        customerId,
-        `🎉 *Demo complete.*\\nShare it with colleagues:\\n${shareLink}\\n\\nWant to test more features? Reply *MORE*.`
-      );
-      await setState(env, customerId, "demo_complete", 0);
     }
     return true;
   }
+
+  const capped = Math.max(1, Math.min(10, next));
+  await sendImage(env, customerId, buildCardUrl(env, capped));
 
   if (next === 1) {
     await sendText(
       env,
       customerId,
-      "Thanks for visiting 🙌\\n\\nNow you’ve got your first stamp.\\n\\nWant to test more features? Reply *MORE*."
+      `Thanks for visiting 🙌
+
+Now you’ve got your first stamp.
+
+Want to test more features? Reply *MORE*.`
     );
     await setState(env, customerId, "demo_after_first_stamp", 1);
     return true;
@@ -711,9 +765,12 @@ async function handleStamp(env, customerId, token) {
   await sendText(
     env,
     customerId,
-    "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.\\n\\n" +
-      `🎉 *Demo complete.* Share it with colleagues:\\n${shareLink}\\n\\n` +
-      "Want to test more features? Reply *MORE*."
+    `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
+
+🎉 *Demo complete.* Share it with colleagues:
+${shareLink}
+
+Want to test more features? Reply *MORE*.`
   );
 
   await setState(env, customerId, "demo_complete", 0);
@@ -817,6 +874,7 @@ export async function onRequestPost({ request, env }) {
 
       if (token === "SIGNUP" || token === "SIGN UP") {
         await resetVisitCount(env, from);
+        await resetStreakState(env, from);
         await clearState(env, from);
         await startSignupFlow(env, from, waName);
         return new Response("ok", { status: 200 });
@@ -875,8 +933,9 @@ export async function onRequestPost({ request, env }) {
       await sendText(
         env,
         from,
-        "👋 Welcome to the WhatsApp stamp card demo.\\n\\n" +
-          "Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit."
+        `👋 Welcome to the WhatsApp stamp card demo.
+
+Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit.`
       );
       return new Response("ok", { status: 200 });
     }
