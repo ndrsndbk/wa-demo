@@ -1,4 +1,3 @@
-
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
 // No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
 
@@ -263,22 +262,113 @@ async function setCustomerPreferredDrink(env, customerId, drink) {
   );
 }
 
+async function resetVisitCount(env, customerId) {
+  await sbUpsert(
+    env,
+    "customers",
+    [
+      { customer_id: customerId, number_of_visits: 0, last_visit_at: null },
+    ],
+    "customer_id"
+  );
+}
+
+// ---------- Streak helpers ----------
+
+function getTodayIsoDate() {
+  const now = new Date();
+  const y = now.getUTCFullYear();
+  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(now.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function dayDiff(fromDate, toDate) {
+  const a = new Date(`${fromDate}T00:00:00Z`);
+  const b = new Date(`${toDate}T00:00:00Z`);
+  const diff = (b - a) / (1000 * 60 * 60 * 24);
+  return Math.round(diff);
+}
+
+async function updateStreak(env, customerId) {
+  const today = getTodayIsoDate();
+  const row = await sbSelectOne(
+    env,
+    "customer_streaks",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "customer_id,streak_count,last_visit_date,two_day_sent,five_day_sent"
+  );
+
+  let streak = 1;
+  let twoSent = row?.two_day_sent === true;
+  let fiveSent = row?.five_day_sent === true;
+
+  if (row) {
+    const lastDate = row.last_visit_date || today;
+    const diff = dayDiff(lastDate, today);
+
+    if (diff === 0) {
+      streak = row.streak_count || 1;
+    } else if (diff === 1) {
+      streak = (row.streak_count || 1) + 1;
+    } else {
+      streak = 1;
+    }
+  }
+
+  await sbUpsert(
+    env,
+    "customer_streaks",
+    [
+      {
+        customer_id: customerId,
+        streak_count: streak,
+        last_visit_date: today,
+        two_day_sent: twoSent,
+        five_day_sent: fiveSent,
+      },
+    ],
+    "customer_id"
+  );
+
+  return { streak, twoSent, fiveSent };
+}
+
+async function maybeSendStreakMilestones(env, customerId, streak, flags) {
+  if (streak === 2 && !flags.twoSent) {
+    await sendText(
+      env,
+      customerId,
+      "You’re on a 2-day streak… hit 5 and get double stamps!"
+    );
+    await sbUpdate(
+      env,
+      "customer_streaks",
+      `customer_id=eq.${encodeURIComponent(customerId)}`,
+      { two_day_sent: true }
+    );
+  }
+
+  if (streak === 5 && !flags.fiveSent) {
+    await sendText(env, customerId, "🔥 5-day streak! You’ve earned a reward.");
+    await sbUpdate(
+      env,
+      "customer_streaks",
+      `customer_id=eq.${encodeURIComponent(customerId)}`,
+      { five_day_sent: true }
+    );
+  }
+}
+
 // ---------- Birthday parsing ----------
 
 function parseBirthday(raw) {
   if (!raw) return null;
   const s = raw.trim();
 
-  // YYYY-MM-DD
-  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  // Keep legacy ISO parsing but allow any free-text; caller can ignore null.
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return s;
-
-  // DD/MM/YYYY or DD-MM-YYYY -> ISO
-  m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
-  if (m) {
-    const [, d, mo, y] = m;
-    return `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`;
-  }
 
   return null;
 }
@@ -287,10 +377,10 @@ function parseBirthday(raw) {
 
 async function startSignupFlow(env, customerId, waName) {
   const msg =
-    `Welcome${waName ? ", " + waName : ""} 👋\n` +
-    "2 quick steps to join the stamp card:\n\n" +
-    "1️⃣ When is your birthday? (e.g. 1995-07-12)\n" +
-    "_You get a free drink on your birthday._";
+    `Hey${waName ? ", " + waName : ""}! 👋\n\n` +
+    "Want to see how the stamp card works?\n" +
+    "Share your birthday in any format.\n\n" +
+    "You’ll get a free drink on your day 🎂🥳";
   await sendText(env, customerId, msg);
   await setState(env, customerId, "signup", 1);
 }
@@ -300,16 +390,8 @@ async function handleSignupTextStep1(env, customerId, text) {
   if (st.active_flow !== "signup" || st.step !== 1) return false;
 
   const iso = parseBirthday(text);
-  if (!iso) {
-    await sendText(
-      env,
-      customerId,
-      "Please send your birthday in this format: *1995-07-12* 🙏"
-    );
-    return true;
-  }
-
-  await setCustomerBirthday(env, customerId, iso);
+  const birthdayValue = iso || text.trim();
+  await setCustomerBirthday(env, customerId, birthdayValue);
 
   await sendInteractiveButtons(env, customerId, "2️⃣ Choose your go-to drink:", [
     { id: "drink_matcha", title: "Matcha" },
@@ -319,6 +401,129 @@ async function handleSignupTextStep1(env, customerId, text) {
 
   await setState(env, customerId, "signup", 2);
   return true;
+}
+
+// ---------- Connect & branching flows ----------
+
+function buildShareLink(env) {
+  if (env.SHARE_LINK) return env.SHARE_LINK;
+  return "https://wa.me/?text=Check%20out%20this%20WhatsApp%20demo";
+}
+
+function getWebsiteUrl(env) {
+  return env.WEBSITE_URL || "https://www.whiteprompt.com";
+}
+
+function getDashboardUrl(env) {
+  return env.DASHBOARD_URL || env.REPORT_URL || "https://demo.whiteprompt.com/dashboard";
+}
+
+async function sendConnectMenu(env, to, waName) {
+  const body =
+    `Hi${waName ? " " + waName : ""}! 🤝\n\n` +
+    "Thanks for stopping by.\n" +
+    "What would you like to explore?";
+
+  await sendInteractiveButtons(env, to, body, [
+    { id: "connect_meeting", title: "MEETING" },
+    { id: "connect_demo", title: "DEMO" },
+  ]);
+}
+
+async function startMeetingFlow(env, customerId) {
+  await sendInteractiveButtons(
+    env,
+    customerId,
+    "Which bespoke service are you most interested in?",
+    [
+      { id: "meeting_meta", title: "META SYSTEMS" },
+      { id: "meeting_apps", title: "APPS & AUTO" },
+      { id: "meeting_advisory", title: "STRAT ADVISORY" },
+    ]
+  );
+  await setState(env, customerId, "meeting", 1);
+}
+
+async function handleMeetingServiceReply(env, customerId, replyId) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "meeting" || st.step !== 1) return false;
+
+  const map = {
+    meeting_meta: "Meta Systems",
+    meeting_apps: "Applications / Automation",
+    meeting_advisory: "Strategic Advisory",
+  };
+  const selected = map[replyId];
+  if (!selected) return false;
+
+  await sendText(
+    env,
+    customerId,
+    `Great choice! We’ll focus on *${selected}*.\n\n` +
+      "Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)"
+  );
+
+  await setState(env, customerId, `meeting_${replyId}`, 2);
+  return true;
+}
+
+async function handleMeetingTimeText(env, customerId, rawText) {
+  const st = await getState(env, customerId);
+  if (!st.active_flow?.startsWith("meeting_") || st.step !== 2) return false;
+
+  const serviceKey = st.active_flow.replace("meeting_", "");
+  const map = {
+    meeting_meta: "Meta Systems",
+    meeting_apps: "Applications / Automation",
+    meeting_advisory: "Strategic Advisory",
+  };
+  const selected = map[serviceKey] || "our services";
+
+  await sendText(
+    env,
+    customerId,
+    `Nice! We’ll pencil in *${rawText}* for *${selected}*.\n\n` +
+      `We’ll confirm via email soon. More here: ${getWebsiteUrl(env)}`
+  );
+
+  await clearState(env, customerId);
+  return true;
+}
+
+async function startDemoFlow(env, customerId, waName) {
+  await startSignupFlow(env, customerId, waName);
+}
+
+async function sendMoreMenu(env, customerId) {
+  const body =
+    "Want to try more features?\n\n" +
+    "Pick an option:";
+  await sendInteractiveButtons(env, customerId, body, [
+    { id: "more_streak", title: "STREAK" },
+    { id: "more_dash", title: "DASH" },
+  ]);
+  await setState(env, customerId, "more", 1);
+}
+
+async function sendDashboardLink(env, customerId) {
+  await sendText(
+    env,
+    customerId,
+    `Here’s the dashboard link:\n${getDashboardUrl(env)}\n\n` +
+      "It updates in real-time during the demo."
+  );
+}
+
+async function handleStreakCommand(env, customerId) {
+  const updated = await updateStreak(env, customerId);
+  await maybeSendStreakMilestones(env, customerId, updated.streak, updated);
+
+  await sendText(
+    env,
+    customerId,
+    `Logging today. You’re on a *${updated.streak}-day* streak now! 🔥`
+  );
+  await clearState(env, customerId);
 }
 
 async function handleSignupInteractiveStep2(env, customerId, replyId) {
@@ -390,14 +595,19 @@ async function handleStamp(env, customerId, token) {
     "customer_id"
   );
 
+  const streakUpdate = await updateStreak(env, customerId);
+  await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
+
   const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
 
+  const shareLink = buildShareLink(env);
   await sendText(
     env,
     customerId,
     "Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.\n\n" +
-      "🎉 *Demo complete.* Reply *SIGNUP* to restart or share this with your team."
+      `🎉 *Demo complete.* Share it with colleagues: ${shareLink}\n\n` +
+      "Want to test more features? Reply *MORE*."
   );
 
   await setState(env, customerId, "demo_complete", 0);
@@ -449,7 +659,7 @@ export async function onRequestPost({ request, env }) {
 
     const type = message.type;
 
-    // Interactive: drink selection
+    // Interactive: buttons
     if (type === "interactive") {
       const interactive = message.interactive || {};
       let replyId = null;
@@ -457,6 +667,31 @@ export async function onRequestPost({ request, env }) {
         replyId = interactive.button_reply?.id;
       } else if (interactive.type === "list_reply") {
         replyId = interactive.list_reply?.id;
+      }
+
+      if (replyId === "connect_meeting") {
+        await startMeetingFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "connect_demo") {
+        await startDemoFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId && (await handleMeetingServiceReply(env, from, replyId))) {
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "more_streak") {
+        await handleStreakCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "more_dash") {
+        await sendDashboardLink(env, from);
+        await clearState(env, from);
+        return new Response("ok", { status: 200 });
       }
 
       if (replyId && (await handleSignupInteractiveStep2(env, from, replyId))) {
@@ -471,14 +706,50 @@ export async function onRequestPost({ request, env }) {
       const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
 
+      // Meeting availability reply
+      if (await handleMeetingTimeText(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Start connect menu
+      if (token === "CONNECT") {
+        await sendConnectMenu(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Meeting branch
+      if (token === "MEETING") {
+        await startMeetingFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
       // Start demo/sign-up
-      if (token === "DEMO" || token === "SIGNUP") {
+      if (token === "DEMO" || token === "SIGNUP" || token === "SIGN UP") {
+        if (token === "SIGNUP" || token === "SIGN UP") {
+          await resetVisitCount(env, from);
+        }
         await startSignupFlow(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
       // Birthday step
       if (await handleSignupTextStep1(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Streak test entry
+      if (token === "MORE") {
+        await sendMoreMenu(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "STREAK") {
+        await handleStreakCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "DASH") {
+        await sendDashboardLink(env, from);
         return new Response("ok", { status: 200 });
       }
 
@@ -492,8 +763,8 @@ export async function onRequestPost({ request, env }) {
       await sendText(
         env,
         from,
-        "👋 Welcome to the WhatsApp stamp card demo.\n" +
-          "Send *DEMO* or *SIGNUP* to start, or *STAMP* after a visit."
+        "👋 Welcome to the WhatsApp stamp card demo.\n\n" +
+          "Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit."
       );
       return new Response("ok", { status: 200 });
     }
