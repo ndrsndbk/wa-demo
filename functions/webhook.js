@@ -637,7 +637,20 @@ export async function onRequestPost({ request, env }) {
   try {
     const data = await request.json();
 
-    const entry = data.entry?.[0] || {};
+    console.log("RAW WEBHOOK:", JSON.stringify(data));
+
+      const entry = data.entry?.[0] || {};
+      const changes = entry.changes?.[0] || {};
+      const value = changes.value || {};
+      const message = value.messages?.[0];
+
+      if (!message) {
+        // Likely a status/update webhook without inbound user message
+        console.log("No inbound message in payload. Keys:", Object.keys(value || {}));
+        return new Response("ignored", { status: 200 });
+      }
+
+const entry = data.entry?.[0] || {};
     const changes = entry.changes?.[0] || {};
     const value = changes.value || {};
     const message = value.messages?.[0];
