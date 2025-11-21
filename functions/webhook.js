@@ -639,23 +639,16 @@ export async function onRequestPost({ request, env }) {
 
     console.log("RAW WEBHOOK:", JSON.stringify(data));
 
-      const entry = data.entry?.[0] || {};
-      const changes = entry.changes?.[0] || {};
-      const value = changes.value || {};
-      const message = value.messages?.[0];
-
-      if (!message) {
-        // Likely a status/update webhook without inbound user message
-        console.log("No inbound message in payload. Keys:", Object.keys(value || {}));
-        return new Response("ignored", { status: 200 });
-      }
-
-const entry = data.entry?.[0] || {};
+    const entry = data.entry?.[0] || {};
     const changes = entry.changes?.[0] || {};
     const value = changes.value || {};
     const message = value.messages?.[0];
 
-    if (!message) return new Response("ignored", { status: 200 });
+    if (!message) {
+      // Likely a status/update webhook without inbound user message
+      console.log("No inbound message in payload. Keys:", Object.keys(value || {}));
+      return new Response("ignored", { status: 200 });
+    }
 
     const msgId = message.id;
     const from = message.from;
