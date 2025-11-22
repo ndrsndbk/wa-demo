@@ -572,15 +572,14 @@ More content about us is here: ${getWebsiteUrl(env)}`
 }
 
 async function startDemoFlow(env, customerId, waName) {
-  const intro = `Hey${waName ? ` ${waName}` : ""}! 👋
-
-Ready to test the stamp card?
+  const intro = `Ready to test the stamp card? 👋
 
 Imagine a customer walks into a coffee shop and scans a QR.
 
 Then they get sent this message 👇
 
 Simply send *SIGNUP* to get your stamp card.`;
+  
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
 }
