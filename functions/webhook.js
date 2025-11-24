@@ -395,7 +395,9 @@ function parseBirthday(raw) {
 async function startSignupFlow(env, customerId, waName) {
   const msg = `Hey${waName ? `, ${waName}` : ""}! 👋
 
-First, when’s your birthday?
+_Two quick questions to set up your stamp card_ ⚡
+
+ 1️⃣ When’s your birthday?
 e.g. 1993-02-07
 
 _(you get a free drink on your birthday)_`;
@@ -411,7 +413,7 @@ async function handleSignupTextStep1(env, customerId, text) {
   const birthdayValue = iso || text.trim();
   await setCustomerBirthday(env, customerId, birthdayValue);
 
-  await sendInteractiveButtons(env, customerId, "Which drink do you prefer?", [
+  await sendInteractiveButtons(env, customerId, "2️⃣ Which drink do you prefer?", [
     { id: "drink_matcha", title: "Matcha" },
     { id: "drink_americano", title: "Americano" },
     { id: "drink_cappuccino", title: "Cappuccino" },
