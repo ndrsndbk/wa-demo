@@ -1,15 +1,32 @@
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
 // No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
+//
+// Required environment variables (no defaults to avoid accidental leaks):
+// - SUPABASE_URL: Supabase project URL (no trailing slash)
+// - SUPABASE_WEBHOOK_KEY or SUPABASE_ANON_KEY (or a restricted service key as last resort)
+// - WHATSAPP_APP_SECRET: Meta app secret used to verify X-Hub-Signature-256
+// - WHATSAPP_TOKEN: WhatsApp Cloud API token for sending messages
+// - PHONE_NUMBER_ID: WhatsApp phone number ID for outbound messages
+// - VERIFY_TOKEN or WHATSAPP_VERIFY_TOKEN: subscription verification shared secret
+// Optional hardening/customization:
+// - CARDS_BASE_URL / CARDS_VERSION / CARD_PREFIX / STAMP_CARD_ZERO_URL / SHARE_LINK
+// - WEBSITE_URL / DASHBOARD_URL / REPORT_URL
+//
+// Ensure WHATSAPP_APP_SECRET and the verify token never appear in client bundles or logs.
 
 // ---------- Supabase REST helpers ----------
 
 function getSupabaseConfig(env) {
   const url = env.SUPABASE_URL;
-  const key = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_KEY;
+  const key =
+    env.SUPABASE_WEBHOOK_KEY ||
+    env.SUPABASE_ANON_KEY ||
+    env.SUPABASE_SERVICE_ROLE_KEY ||
+    env.SUPABASE_KEY;
   if (!url || !key) {
-    throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY/KEY");
+    throw new Error("Missing SUPABASE_URL or SUPABASE_WEBHOOK/ANON KEY");
   }
-  return { url: url.replace(/\/+$/, ""), key };
+  return { url: url.replace(/\+$/, ""), key };
 }
 
 function sbHeaders(env, extra = {}) {
@@ -83,7 +100,7 @@ async function sbUpdate(env, table, filterQuery, patch) {
 // ---------- WhatsApp helpers ----------
 
 function getPhoneNumberId(env) {
-  return env.PHONE_NUMBER_ID || "858272234034248"; // your real WA number ID
+  return env.PHONE_NUMBER_ID;
 }
 
 async function sendWhatsApp(env, payload) {
@@ -167,6 +184,37 @@ function buildCardUrl(env, visits) {
 
 function getZeroCardUrl(env) {
   return env.STAMP_CARD_ZERO_URL || buildCardUrl(env, 0);
+}
+
+function constantTimeEquals(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function verifyMetaSignature(appSecret, signatureHeader, rawBody) {
+  if (!signatureHeader || !signatureHeader.startsWith("sha256=")) return false;
+
+  const signature = signatureHeader.slice("sha256=".length);
+  const encoder = new TextEncoder();
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(appSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const digest = await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody));
+  const hex = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  return constantTimeEquals(hex, signature);
 }
 
 // ---------- Idempotency: processed_events ----------
@@ -403,6 +451,30 @@ _(you get a free drink on your birthday)_`;
   await setState(env, customerId, "signup", 1);
 }
 
+async function handleSignupInteractiveStep2(env, customerId, replyId) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "signup" || st.step !== 2) return false;
+
+  const map = {
+    drink_matcha: "Matcha",
+    drink_americano: "Americano",
+    drink_cappuccino: "Cappuccino",
+  };
+  const drink = map[replyId] || replyId || "Unknown";
+  await setCustomerPreferredDrink(env, customerId, drink);
+
+  await sendText(
+    env,
+    customerId,
+    `Nice! We’ve saved your preference: *${drink}*.
+
+We’ll let you know about offers and surprises.`
+  );
+
+  await clearState(env, customerId);
+  return true;
+}
+
 async function handleSignupTextStep1(env, customerId, text) {
   const st = await getState(env, customerId);
   if (st.active_flow !== "signup" || st.step !== 1) return false;
@@ -526,163 +598,99 @@ async function handleMeetingServiceReply(env, customerId, replyId, waName) {
     meeting_apps: "Applications / Automation",
     meeting_advisory: "Strategic Advisory",
   };
-  const selected = map[replyId];
-  if (!selected) return false;
-
-  await logMeetingSelection(env, customerId, waName, selected);
+  const selection = map[replyId] || replyId || "Unknown";
+  await logMeetingSelection(env, customerId, waName, selection);
 
   await sendText(
     env,
     customerId,
-    `Awesome! We’ll focus on *${selected}*.
+    `Great — we’ll schedule time to discuss *${selection}*.
 
-Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)`
+Share your availability here (or send a calendar link).`
   );
 
-  await setState(env, customerId, `meeting_${replyId}`, 2);
+  await setState(env, customerId, "meeting", 2);
   return true;
 }
 
 async function handleMeetingTimeText(env, customerId, rawText) {
   const st = await getState(env, customerId);
-  if (!st.active_flow?.startsWith("meeting_") || st.step !== 2) return false;
-
-  const serviceKey = st.active_flow.replace("meeting_", "");
-  const map = {
-    meta: "Meta Systems",
-    apps: "Applications / Automation",
-    advisory: "Strategic Advisory",
-  };
-  const selected = map[serviceKey] || "our services";
+  if (st.active_flow !== "meeting" || st.step !== 2) return false;
 
   await updateMeetingRequestTime(env, customerId, rawText);
-
   await sendText(
     env,
     customerId,
-    `Nice! We’ll pencil in *${rawText}* for *${selected}*.
-
-We’ll reachout to confirm more details soon. 
-
-More content about us is here: ${getWebsiteUrl(env)}`
+    "Thanks! We’ll confirm a meeting time shortly."
   );
 
   await clearState(env, customerId);
   return true;
 }
 
-async function startDemoFlow(env, customerId, waName) {
-  const intro = `Ready to test the stamp card? 👋
-
-Imagine a customer walks into a coffee shop and scans a QR.
-
-Then they get sent this message 👇
-
-Simply send *SIGNUP* to get your stamp card.`;
-  
-  await sendText(env, customerId, intro);
-  await setState(env, customerId, "demo_intro", 0);
-}
-
-async function sendMoreMenu(env, customerId) {
-  const body = `Want to try more features? Pick an option:
-
-🔥 Reply *STREAK* to test gamification.
-
-📊 Reply *DASH* to see the manager dashboard.`;
-  await sendInteractiveButtons(env, customerId, body, [
-    { id: "more_streak", title: "STREAK" },
-    { id: "more_dash", title: "DASH" },
-  ]);
-  await setState(env, customerId, "more", 1);
-}
+// ---------- Demo flow ----------
 
 async function sendDashboardLink(env, customerId) {
+  const url = getDashboardUrl(env);
   await sendText(
     env,
     customerId,
-    `Here’s the dashboard link:
-${getDashboardUrl(env)}
-
-It updates in real-time during the demo.
-
-More content about us is here: ${getWebsiteUrl(env)}`
+    `Here’s the live dashboard:\n${url}\n\nShare it with your team.`
   );
+}
+
+async function sendMoreMenu(env, customerId) {
+  await sendInteractiveButtons(env, customerId, "Want to try more features?", [
+    { id: "more_streak", title: "STREAK" },
+    { id: "more_dash", title: "DASHBOARD" },
+  ]);
+}
+
+async function startDemoFlow(env, customerId, waName) {
+  const shareLink = buildShareLink(env);
+  await sendText(
+    env,
+    customerId,
+    `Hi${waName ? ` ${waName}` : ""}! 👋 This is the WhatsApp stamp card demo.
+
+Send *STAMP* each time you “visit” to see your card fill up.
+
+Want to skip ahead? Send *STREAK* to fast-forward and test milestones.
+
+Share link: ${shareLink}`
+  );
+
+  const zeroUrl = getZeroCardUrl(env);
+  await sendImage(env, customerId, zeroUrl, "Your digital stamp card (0/10)");
+
+  await setState(env, customerId, "demo", 0);
 }
 
 async function handleStreakCommand(env, customerId) {
   await sendText(
     env,
     customerId,
-    `Let’s test streak gamification 🔥 
+    `Testing streak mode — send *STAMP* repeatedly to simulate daily visits.
 
-A streak means visiting multiple days in a row.
-
-Send *STAMP* to make another “purchase”.`
+We’ll message you when you hit streak milestones.`
   );
   await setState(env, customerId, "demo_streak", 1);
 }
 
-async function handleSignupInteractiveStep2(env, customerId, replyId) {
+async function handleStamp(env, customerId, rawText) {
   const st = await getState(env, customerId);
-  if (st.active_flow !== "signup" || st.step !== 2) return false;
+  const shareLink = buildShareLink(env);
 
-  const map = {
-    drink_matcha: "matcha",
-    drink_americano: "americano",
-    drink_cappuccino: "cappuccino",
-  };
-  const drink = map[replyId];
-  if (!drink) return false;
-
-  await setCustomerPreferredDrink(env, customerId, drink);
-
-  await sendText(env, customerId, "Nice choice 😎 Here’s your digital stamp card:");
-  await sendImage(env, customerId, getZeroCardUrl(env));
-
-  await sendText(
-    env,
-    customerId,
-    `Now imagine you’ve just bought a coffee ☕️
-
-Respond *STAMP* to claim your first stamp.`
-  );
-
-  await setState(env, customerId, "demo_stamp", 1);
-  return true;
-}
-
-// ---------- STAMP handling ----------
-
-async function handleStamp(env, customerId, token) {
-  const st = await getState(env, customerId);
-  const inDemoStamp = st.active_flow === "demo_stamp" && st.step === 1;
-  const inDemoAfterFirst = st.active_flow === "demo_after_first_stamp";
-  const inDemoStreak = st.active_flow === "demo_streak";
-
-  if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
-    // allow STAMP even outside strict state for demo
-    if (token !== "STAMP") return false;
-  }
-
-  if (token !== "STAMP") {
-    await sendText(
-      env,
-      customerId,
-      "To continue the demo, type *STAMP* after your ‘purchase’ ☕️"
-    );
-    return true;
-  }
-
-  const row = await sbSelectOne(
+  const customer = await sbSelectOne(
     env,
     "customers",
     `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "number_of_visits"
+    "number_of_visits,last_visit_at"
   );
+  const visits = Number(customer?.number_of_visits || 0);
+  const next = visits + 1;
+  const capped = Math.max(1, Math.min(10, next));
 
-  const current = row && row.number_of_visits ? Number(row.number_of_visits) : 0;
-  const next = current + 1;
   const now = new Date().toISOString();
 
   await sbUpsert(
@@ -691,44 +699,38 @@ async function handleStamp(env, customerId, token) {
     [
       {
         customer_id: customerId,
-        number_of_visits: next,
+        number_of_visits: capped,
         last_visit_at: now,
       },
     ],
     "customer_id"
   );
 
-  if (!inDemoStreak) {
-    const streakUpdate = await updateStreak(env, customerId);
-    await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
-  }
+  const streakInfo = await updateStreak(env, customerId);
+  await maybeSendStreakMilestones(env, customerId, streakInfo.streak, streakInfo);
 
-  const shareLink = buildShareLink(env);
+  if (st.active_flow === "demo_streak") {
+    await sendImage(env, customerId, buildCardUrl(env, capped));
 
-  if (inDemoStreak) {
-    const capped = Math.max(1, Math.min(10, next));
-
-    if (next === 5) {
-      await sendText(
-        env,
-        customerId,
-        `Great — you’ve unlocked *double stamps*! 🎉🔥
-
-Well done.`
-      );
-      const streakCardVisits = Math.min(10, next + 1);
-      await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
-      await sendText(
-        env,
-        customerId,
-        `🎉 *Demo complete.*
+    if (st.step >= 1 && st.step < 5) {
+      const nextStep = st.step + 1;
+      if (nextStep === 5) {
+        await sendText(
+          env,
+          customerId,
+          `🎉 *Demo complete.*
 Share it with colleagues:
 ${shareLink}
 
 Want to test more features?
 Reply *MORE*.`
-      );
-      await setState(env, customerId, "demo_complete", 0);
+        );
+        await setState(env, customerId, "demo_complete", 0);
+        return true;
+      }
+
+      await sendText(env, customerId, "Nice! Keep going — send *STAMP* again.");
+      await setState(env, customerId, "demo_streak", nextStep);
       return true;
     }
 
@@ -754,7 +756,6 @@ _(Reply with stamp, hit send, repeat x3)_`
     return true;
   }
 
-  const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
 
   if (next === 1) {
@@ -776,12 +777,12 @@ Want to test more features? Reply *MORE*.`
     customerId,
     `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
 
-🎉 *Demo complete.* 
+🎉 *Demo complete.*
 
 Share it with colleagues:
 ${shareLink}
 
-Want to test more features? 
+Want to test more features?
 
 Reply *MORE*.`
   );
@@ -798,8 +799,10 @@ export async function onRequestGet({ request, env }) {
   const token = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge");
 
-  const verifyToken =
-    env.VERIFY_TOKEN || env.WHATSAPP_VERIFY_TOKEN || "myverifytoken";
+  const verifyToken = env.VERIFY_TOKEN || env.WHATSAPP_VERIFY_TOKEN;
+  if (!verifyToken) {
+    return new Response("verify token missing", { status: 500 });
+  }
 
   if (mode === "subscribe" && token === verifyToken) {
     return new Response(challenge || "", { status: 200 });
@@ -811,7 +814,31 @@ export async function onRequestGet({ request, env }) {
 
 export async function onRequestPost({ request, env }) {
   try {
-    const data = await request.json();
+    const appSecret = env.WHATSAPP_APP_SECRET || env.APP_SECRET;
+    if (!appSecret) {
+      return new Response("app secret missing", { status: 500 });
+    }
+
+    const rawBody = await request.text();
+    const signatureHeader = request.headers.get("x-hub-signature-256");
+
+    const signatureValid = await verifyMetaSignature(
+      appSecret,
+      signatureHeader,
+      rawBody
+    );
+
+    if (!signatureValid) {
+      return new Response("invalid signature", { status: 401 });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(rawBody);
+    } catch (parseErr) {
+      console.error("Invalid JSON body", parseErr);
+      return new Response("invalid json", { status: 400 });
+    }
 
     const entry = data.entry?.[0] || {};
     const changes = entry.changes?.[0] || {};
