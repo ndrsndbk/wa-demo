@@ -462,7 +462,7 @@ async function startMeetingFlow(env, customerId) {
     "Which bespoke service are you most interested in?",
     [
       { id: "meeting_meta", title: "META SYSTEMS" },
-      { id: "meeting_apps", title: "APPs & AUTOs" },
+      { id: "meeting_apps", title: "APPS & AUTOMATIONS" },
       { id: "meeting_advisory", title: "STRATEGIC ADVISORY" },
     ]
   );
@@ -519,6 +519,31 @@ async function updateMeetingRequestTime(env, customerId, rawText) {
   ]);
 }
 
+async function updateMeetingRequestEmail(env, customerId, emailText) {
+  const latest = await getLatestMeetingRequest(env, customerId);
+  const now = new Date().toISOString();
+
+  if (latest?.id) {
+    await sbUpdate(
+      env,
+      "meeting_requests",
+      `id=eq.${encodeURIComponent(latest.id)}`,
+      { email: emailText, status: "email_captured", updated_at: now }
+    );
+    return;
+  }
+
+  await sbInsert(env, "meeting_requests", [
+    {
+      customer_id: customerId,
+      email: emailText,
+      status: "email_captured",
+      created_at: now,
+      updated_at: now,
+    },
+  ]);
+}
+
 async function handleMeetingServiceReply(env, customerId, replyId, waName) {
   const st = await getState(env, customerId);
   if (st.active_flow !== "meeting" || st.step !== 1) return false;
@@ -564,9 +589,28 @@ async function handleMeetingTimeText(env, customerId, rawText) {
     customerId,
     `Nice! We’ll pencil in *${rawText}* for *${selected}*.
 
-We’ll reachout to confirm more details soon. 
+_Final step:_
+Please reply with your email address so we can book the meeting.`
+  );
 
-More content about us is here: ${getWebsiteUrl(env)}`
+  await setState(env, customerId, `meeting_${serviceKey}`, 3);
+  return true;
+}
+
+async function handleMeetingEmailText(env, customerId, rawText) {
+  const st = await getState(env, customerId);
+  if (!st.active_flow?.startsWith("meeting_") || st.step !== 3) return false;
+
+  await updateMeetingRequestEmail(env, customerId, rawText);
+
+  await sendText(
+    env,
+    customerId,
+    `Thanks! You’re all set — we’ll reach out soon to confirm details.
+
+In the meantime, you can:
+• Send *DEMO* to test our Meta Systems
+• Or visit ${getWebsiteUrl(env)} for explainer videos`
   );
 
   await clearState(env, customerId);
@@ -902,6 +946,11 @@ export async function onRequestPost({ request, env }) {
 
       // Meeting availability reply
       if (await handleMeetingTimeText(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Meeting email capture reply
+      if (await handleMeetingEmailText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
