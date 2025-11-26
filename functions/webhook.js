@@ -563,7 +563,7 @@ async function handleMeetingServiceReply(env, customerId, replyId, waName) {
     customerId,
     `Awesome! We’ll focus on *${selected}*.
 
-Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)`
+Which day + time suits you? 📅 (e.g. Tue 3pm or 12 Jun 10:00)`
   );
 
   await setState(env, customerId, `meeting_${replyId}`, 2);
@@ -589,7 +589,8 @@ async function handleMeetingTimeText(env, customerId, rawText) {
     customerId,
     `Nice! We’ll pencil in *${rawText}* for *${selected}*.
 
-_Final step:_
+_Final step:_ ⚡
+
 Please reply with your email address so we can book the meeting.`
   );
 
