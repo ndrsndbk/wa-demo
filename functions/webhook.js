@@ -447,7 +447,9 @@ async function sendConnectMenu(env, to, waName) {
 
 Thanks for connecting.
 
-Would you like to book a meeting or try a demo?`;
+_We help businesses grow with custom Meta loyalty systems, digital products, and strategic advisory_
+
+Would you like to book a *meeting* or *try a demo*?`;
 
   await sendInteractiveButtons(env, to, body, [
     { id: "connect_meeting", title: "MEETING" },
@@ -619,13 +621,13 @@ In the meantime, you can:
 }
 
 async function startDemoFlow(env, customerId, waName) {
-  const intro = `Ready to test the stamp card? 👋
+  const intro = `Here’s a demo of a *Meta Loyalty System*: the *WhatsApp Stamp Card* 👇
 
-Imagine a customer walks into a coffee shop and scans a QR.
+_Imagine a customer walks into a coffee shop and scans a QR._
 
-Then they get sent this message 👇
+Then they get sent this message:
 
-Simply send *SIGNUP* to get your stamp card.`;
+Send *SIGNUP* to get your stamp card. 🙂 `;
   
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
