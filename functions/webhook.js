@@ -767,16 +767,16 @@ Well done.`
       );
       const streakCardVisits = Math.min(10, next + 1);
       await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
-      await sendText(
-        env,
-        customerId,
-        `🎉 *Demo complete.*
-Share it with colleagues:
+      await sendInteractiveButtons(env, customerId, `🎉 *Demo complete.*
+
+Here's the link to share the demo:
 ${shareLink}
 
-Want to test more features?
-Reply *MORE*.`
-      );
+What would you like to do next?`, [
+  { id: "more_features", title: "MORE" },
+  { id: "book_meeting", title: "MEETING" }
+]);
+
       await setState(env, customerId, "demo_complete", 0);
       return true;
     }
@@ -814,7 +814,11 @@ _(Reply with stamp, hit send, repeat x3)_`
 
 Now you’ve got your first stamp.
 
-Want to test more features? Reply *MORE*.`
+Want to test more features? Reply *MORE*.
+
+Want to explore how this can be applied to your business? Reply *MEETING*.
+
+`
     );
     await setState(env, customerId, "demo_after_first_stamp", 1);
     return true;
