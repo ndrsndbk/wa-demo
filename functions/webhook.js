@@ -1,3 +1,4 @@
+
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
 // No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
 
@@ -52,7 +53,9 @@ async function sbInsert(env, table, rows) {
 
 async function sbUpsert(env, table, rows, keyCols) {
   const { url } = getSupabaseConfig(env);
-  const onConflict = Array.isArray(keyCols) ? keyCols.join(",") : keyCols;
+  const onConflict = Array.isArray(keyCols)
+    ? keyCols.join(",")
+    : keyCols;
   const res = await fetch(
     `${url}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
     {
@@ -381,6 +384,7 @@ function parseBirthday(raw) {
   if (!raw) return null;
   const s = raw.trim();
 
+  // Keep legacy ISO parsing but allow any free-text; caller can ignore null.
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return s;
 
@@ -394,7 +398,7 @@ async function startSignupFlow(env, customerId, waName) {
 
 _Two quick questions to set up your stamp card_ ⚡
 
-1️⃣ When’s your birthday?
+ 1️⃣ When’s your birthday?
 e.g. 1993-02-07
 
 _(you get a free drink on your birthday)_`;
@@ -442,9 +446,11 @@ function getDashboardUrl(env) {
 async function sendConnectMenu(env, to, waName) {
   const body = `Hi${waName ? ` ${waName}` : ""}! 🤝
 
-We help businesses grow with custom Meta loyalty systems, digital products, and strategic advisory.
+Thanks for connecting.
 
-Would you like to book a meeting or try a demo?`;
+_We help businesses grow with custom Meta loyalty systems, digital products, and strategic advisory_
+
+Would you like to book a *meeting* or *try a demo*?`;
 
   await sendInteractiveButtons(env, to, body, [
     { id: "connect_meeting", title: "MEETING" },
@@ -484,9 +490,9 @@ async function getLatestMeetingRequest(env, customerId) {
   return await sbSelectOne(
     env,
     "meeting_requests",
-    `customer_id=eq.${encodeURIComponent(
-      customerId
-    )}&status=eq.${encodeURIComponent("service_selected")}&order=created_at.desc`,
+    `customer_id=eq.${encodeURIComponent(customerId)}&status=eq.${encodeURIComponent(
+      "service_selected"
+    )}&order=created_at.desc`,
     "id"
   );
 }
@@ -560,7 +566,7 @@ async function handleMeetingServiceReply(env, customerId, replyId, waName) {
     customerId,
     `Awesome! We’ll focus on *${selected}*.
 
-Which day + time suits you? (e.g. Tue 3pm or 12 Jun 10:00)`
+Which day + time suits you? 📅 (e.g. Tue 3pm or 12 Jun 10:00)`
   );
 
   await setState(env, customerId, `meeting_${replyId}`, 2);
@@ -586,7 +592,8 @@ async function handleMeetingTimeText(env, customerId, rawText) {
     customerId,
     `Nice! We’ll pencil in *${rawText}* for *${selected}*.
 
-_Final step:_
+_Final step:_ ⚡
+
 Please reply with your email address so we can book the meeting.`
   );
 
@@ -615,13 +622,13 @@ In the meantime, you can:
 }
 
 async function startDemoFlow(env, customerId, waName) {
-  const intro = `Ready to test the stamp card? 👋
+  const intro = `Here’s a demo of a *Meta Loyalty System*: the *WhatsApp Stamp Card* 👇
 
-Imagine a customer walks into a coffee shop and scans a QR.
+_Imagine a customer walks into a coffee shop and scans a QR._
 
-Then they get sent this message 👇
+Then they get sent this message:
 
-Simply send *SIGNUP* to get your stamp card.`;
+Send *SIGNUP* to get your stamp card. 🙂 `;
   
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
@@ -704,6 +711,7 @@ async function handleStamp(env, customerId, token) {
   const inDemoStreak = st.active_flow === "demo_streak";
 
   if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
+    // allow STAMP even outside strict state for demo
     if (token !== "STAMP") return false;
   }
 
@@ -747,43 +755,28 @@ async function handleStamp(env, customerId, token) {
 
   const shareLink = buildShareLink(env);
 
-  // --- Streak demo branch ---
   if (inDemoStreak) {
     const capped = Math.max(1, Math.min(10, next));
 
     if (next === 5) {
-      // 1) Double-stamps text
       await sendText(
         env,
         customerId,
-        `*5 Day Streak* 🏆 — you’ve unlocked *double stamps!* 🎉🔥
+        `Great — you’ve unlocked *double stamps*! 🎉🔥
 
-Well done!`
+Well done.`
       );
-
-      // 2) Updated stamp card image
       const streakCardVisits = Math.min(10, next + 1);
       await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
+      await sendInteractiveButtons(env, customerId, `🎉 *Demo complete.*
 
-      // 3) Tiny delay to help the image render first
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // 4) Demo complete + buttons
-      await sendInteractiveButtons(
-        env,
-        customerId,
-        `💪 *Streak & Gamification Demo complete.*
-
-_Here's the link to share the demo_ 👇
-
+Here's the link to share the demo:
 ${shareLink}
 
-What would you like to do next?`,
-        [
-          { id: "more_features", title: "MORE" },
-          { id: "book_meeting", title: "MEETING" },
-        ]
-      );
+What would you like to do next?`, [
+  { id: "more_features", title: "MORE" },
+  { id: "book_meeting", title: "MEETING" }
+]);
 
       await setState(env, customerId, "demo_complete", 0);
       return true;
@@ -811,7 +804,6 @@ _(Reply with stamp, hit send, repeat x3)_`
     return true;
   }
 
-  // --- Normal demo branch ---
   const capped = Math.max(1, Math.min(10, next));
   await sendImage(env, customerId, buildCardUrl(env, capped));
 
@@ -823,26 +815,29 @@ _(Reply with stamp, hit send, repeat x3)_`
 
 Now you’ve got your first stamp.
 
-Want to test more features? Reply *MORE*.`
+Want to test more features? Reply *MORE*.
+
+Want to explore how this can be applied to your business? Reply *MEETING*.
+
+`
     );
     await setState(env, customerId, "demo_after_first_stamp", 1);
     return true;
   }
 
-  // Demo complete with buttons (MORE / MEETING)
-  await sendInteractiveButtons(
+  await sendText(
     env,
     customerId,
-    `🎉 *Demo complete.*
+    `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
 
-Here's the link to share the demo:
+🎉 *Demo complete.* 
+
+Share it with colleagues:
 ${shareLink}
 
-What would you like to do next?`,
-    [
-      { id: "more_features", title: "MORE" },
-      { id: "book_meeting", title: "MEETING" },
-    ]
+Want to test more features? 
+
+Reply *MORE*.`
   );
 
   await setState(env, customerId, "demo_complete", 0);
@@ -878,6 +873,7 @@ export async function onRequestPost({ request, env }) {
     const message = value.messages?.[0];
 
     if (!message) {
+      // Likely a status/update webhook without inbound user message
       return new Response("ignored", { status: 200 });
     }
 
@@ -886,6 +882,7 @@ export async function onRequestPost({ request, env }) {
     const contacts = value.contacts || [];
     const waName = contacts[0]?.profile?.name || null;
 
+    // idempotency
     if (await alreadyProcessed(env, msgId)) {
       return new Response("ok", { status: 200 });
     }
@@ -916,17 +913,6 @@ export async function onRequestPost({ request, env }) {
       }
 
       if (replyId && (await handleMeetingServiceReply(env, from, replyId, waName))) {
-        return new Response("ok", { status: 200 });
-      }
-
-      // New: buttons after demo complete
-      if (replyId === "more_features") {
-        await sendMoreMenu(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId === "book_meeting") {
-        await startMeetingFlow(env, from);
         return new Response("ok", { status: 200 });
       }
 
@@ -966,28 +952,34 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Meeting availability reply
       if (await handleMeetingTimeText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
+      // Meeting email capture reply
       if (await handleMeetingEmailText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
+      // Start connect menu
       if (token === "CONNECT") {
         await sendConnectMenu(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
+      // Meeting branch
       if (token === "MEETING") {
         await startMeetingFlow(env, from);
         return new Response("ok", { status: 200 });
       }
 
+      // Birthday step
       if (await handleSignupTextStep1(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
+      // Streak test entry
       if (token === "MORE") {
         await sendMoreMenu(env, from);
         return new Response("ok", { status: 200 });
@@ -1003,11 +995,13 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Stamp
       if (token === "STAMP") {
         await handleStamp(env, from, token);
         return new Response("ok", { status: 200 });
       }
 
+      // Default help
       await sendText(
         env,
         from,
@@ -1021,5 +1015,6 @@ Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit.`
     console.error("Webhook error:", err);
   }
 
+  // Always 200 so Meta doesn't retry endlessly
   return new Response("ok", { status: 200 });
 }
