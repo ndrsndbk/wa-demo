@@ -31,7 +31,11 @@ async function sbSelectOne(env, table, filterQuery, columns = "*") {
     { headers: sbHeaders(env) }
   );
   if (!res.ok) {
-    console.error(`Supabase selectOne ${table} error`, res.status, await res.text());
+    console.error(
+      `Supabase selectOne ${table} error`,
+      res.status,
+      await res.text()
+    );
     return null;
   }
   const data = await res.json();
@@ -46,15 +50,17 @@ async function sbInsert(env, table, rows) {
     body: JSON.stringify(rows),
   });
   if (!res.ok) {
-    console.error(`Supabase insert ${table} error`, res.status, await res.text());
+    console.error(
+      `Supabase insert ${table} error`,
+      res.status,
+      await res.text()
+    );
   }
 }
 
 async function sbUpsert(env, table, rows, keyCols) {
   const { url } = getSupabaseConfig(env);
-  const onConflict = Array.isArray(keyCols)
-    ? keyCols.join(",")
-    : keyCols;
+  const onConflict = Array.isArray(keyCols) ? keyCols.join(",") : keyCols;
   const res = await fetch(
     `${url}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
     {
@@ -64,7 +70,11 @@ async function sbUpsert(env, table, rows, keyCols) {
     }
   );
   if (!res.ok) {
-    console.error(`Supabase upsert ${table} error`, res.status, await res.text());
+    console.error(
+      `Supabase upsert ${table} error`,
+      res.status,
+      await res.text()
+    );
   }
 }
 
@@ -76,7 +86,11 @@ async function sbUpdate(env, table, filterQuery, patch) {
     body: JSON.stringify(patch),
   });
   if (!res.ok) {
-    console.error(`Supabase update ${table} error`, res.status, await res.text());
+    console.error(
+      `Supabase update ${table} error`,
+      res.status,
+      await res.text()
+    );
   }
 }
 
@@ -104,7 +118,6 @@ async function sbUploadToStorage(env, bucket, path, bytes, contentType) {
     return null;
   }
 
-  // Public URL (for a public bucket)
   const publicUrl = `${url}/storage/v1/object/public/${bucket}/${path}`;
   return publicUrl;
 }
@@ -112,7 +125,7 @@ async function sbUploadToStorage(env, bucket, path, bytes, contentType) {
 // ---------- WhatsApp helpers ----------
 
 function getPhoneNumberId(env) {
-  return env.PHONE_NUMBER_ID || "858272234034248"; // your real WA number ID
+  return env.PHONE_NUMBER_ID || "858272234034248";
 }
 
 async function sendWhatsApp(env, payload) {
@@ -295,9 +308,7 @@ async function resetVisitCount(env, customerId) {
   await sbUpsert(
     env,
     "customers",
-    [
-      { customer_id: customerId, number_of_visits: 0, last_visit_at: null },
-    ],
+    [{ customer_id: customerId, number_of_visits: 0, last_visit_at: null }],
     "customer_id"
   );
 }
@@ -411,11 +422,8 @@ async function maybeSendStreakMilestones(env, customerId, streak, flags) {
 function parseBirthday(raw) {
   if (!raw) return null;
   const s = raw.trim();
-
-  // Keep legacy ISO parsing but allow any free-text; caller can ignore null.
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m) return s;
-
   return null;
 }
 
@@ -518,9 +526,9 @@ async function getLatestMeetingRequest(env, customerId) {
   return await sbSelectOne(
     env,
     "meeting_requests",
-    `customer_id=eq.${encodeURIComponent(customerId)}&status=eq.${encodeURIComponent(
-      "service_selected"
-    )}&order=created_at.desc`,
+    `customer_id=eq.${encodeURIComponent(
+      customerId
+    )}&status=eq.${encodeURIComponent("service_selected")}&order=created_at.desc`,
     "id"
   );
 }
@@ -657,7 +665,6 @@ _Imagine a customer walks into a coffee shop and scans a QR._
 Then they get sent this message:
 
 Send *SIGNUP* to get your stamp card. 🙂 `;
-  
   await sendText(env, customerId, intro);
   await setState(env, customerId, "demo_intro", 0);
 }
@@ -715,7 +722,11 @@ async function handleSignupInteractiveStep2(env, customerId, replyId) {
 
   await setCustomerPreferredDrink(env, customerId, drink);
 
-  await sendText(env, customerId, "Nice choice 😎 Here’s your digital stamp card:");
+  await sendText(
+    env,
+    customerId,
+    "Nice choice 😎 Here’s your digital stamp card:"
+  );
   await sendImage(env, customerId, getZeroCardUrl(env));
 
   await sendText(
@@ -747,7 +758,6 @@ async function handleEduInteractive(env, customerId, replyId) {
   const st = await getState(env, customerId);
   if (st.active_flow !== "edusafe") return false;
 
-  // Step 1: Yes / No
   if (st.step === 1) {
     if (replyId === "edu_no") {
       await sendText(
@@ -781,7 +791,6 @@ What type of incident is it?`,
     return false;
   }
 
-  // Step 2: Incident type selection
   if (st.step === 2) {
     let incidentType = null;
 
@@ -829,7 +838,6 @@ Please reply with a short *text description* of the incident.`
     return true;
   }
 
-  // Step 4: Team leader selection
   if (st.step === 4) {
     const map = {
       edu_leader_A: "Leader A",
@@ -895,7 +903,6 @@ async function handleEduMedia(env, customerId, message) {
   let description = null;
   let mediaUrl = null;
 
-  // Noise = audio (voice note)
   if (type === "audio") {
     mediaType = "audio";
     mediaId = message.audio?.id || null;
@@ -912,7 +919,11 @@ async function handleEduMedia(env, customerId, message) {
 
       if (metaRes.ok) {
         const metaJson = await metaRes.json();
-        const fileRes = await fetch(metaJson.url);
+        const fileRes = await fetch(metaJson.url, {
+          headers: {
+            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+          },
+        });
         const bytes = await fileRes.arrayBuffer();
 
         const mime = message.audio?.mime_type || "audio/ogg";
@@ -930,7 +941,6 @@ async function handleEduMedia(env, customerId, message) {
     }
   }
 
-  // Critical = image
   if (type === "image") {
     mediaType = "image";
     mediaId = message.image?.id || null;
@@ -947,7 +957,11 @@ async function handleEduMedia(env, customerId, message) {
 
       if (metaRes.ok) {
         const metaJson = await metaRes.json();
-        const fileRes = await fetch(metaJson.url);
+        const fileRes = await fetch(metaJson.url, {
+          headers: {
+            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+          },
+        });
         const bytes = await fileRes.arrayBuffer();
 
         const mime = message.image?.mime_type || "image/jpeg";
@@ -966,7 +980,6 @@ async function handleEduMedia(env, customerId, message) {
     }
   }
 
-  // Minor = text only
   if (type === "text") {
     mediaType = "none";
     description = (message.text?.body || "").trim();
@@ -1011,7 +1024,6 @@ async function handleStamp(env, customerId, token) {
   const inDemoStreak = st.active_flow === "demo_streak";
 
   if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
-    // allow STAMP even outside strict state for demo
     if (token !== "STAMP") return false;
   }
 
@@ -1178,7 +1190,6 @@ export async function onRequestPost({ request, env }) {
     const message = value.messages?.[0];
 
     if (!message) {
-      // Likely a status/update webhook without inbound user message
       return new Response("ignored", { status: 200 });
     }
 
@@ -1187,7 +1198,6 @@ export async function onRequestPost({ request, env }) {
     const contacts = value.contacts || [];
     const waName = contacts[0]?.profile?.name || null;
 
-    // idempotency
     if (await alreadyProcessed(env, msgId)) {
       return new Response("ok", { status: 200 });
     }
@@ -1197,15 +1207,12 @@ export async function onRequestPost({ request, env }) {
 
     const type = message.type;
 
-    // Handle EDUSAFE media (audio/image) as early as possible
     if (type === "audio" || type === "image") {
       if (await handleEduMedia(env, from, message)) {
         return new Response("ok", { status: 200 });
       }
-      // fall through if not EDUSAFE
     }
 
-    // Interactive: buttons
     if (type === "interactive") {
       const interactive = message.interactive || {};
       let replyId = null;
@@ -1215,7 +1222,6 @@ export async function onRequestPost({ request, env }) {
         replyId = interactive.list_reply?.id;
       }
 
-      // EDUSAFE interactive flow
       if (replyId && (await handleEduInteractive(env, from, replyId))) {
         return new Response("ok", { status: 200 });
       }
@@ -1252,7 +1258,6 @@ export async function onRequestPost({ request, env }) {
       return new Response("ok", { status: 200 });
     }
 
-    // Text messages
     if (type === "text") {
       const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
@@ -1276,39 +1281,32 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
-      // EDUSAFE minor issue description
       if (await handleEduMedia(env, from, message)) {
         return new Response("ok", { status: 200 });
       }
 
-      // Meeting availability reply
       if (await handleMeetingTimeText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
-      // Meeting email capture reply
       if (await handleMeetingEmailText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
-      // Start connect menu
       if (token === "CONNECT") {
         await sendConnectMenu(env, from, waName);
         return new Response("ok", { status: 200 });
       }
 
-      // Meeting branch
       if (token === "MEETING") {
         await startMeetingFlow(env, from);
         return new Response("ok", { status: 200 });
       }
 
-      // Birthday step
       if (await handleSignupTextStep1(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
-      // Streak test entry
       if (token === "MORE") {
         await sendMoreMenu(env, from);
         return new Response("ok", { status: 200 });
@@ -1324,13 +1322,11 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
-      // Stamp
       if (token === "STAMP") {
         await handleStamp(env, from, token);
         return new Response("ok", { status: 200 });
       }
 
-      // Default help
       await sendText(
         env,
         from,
@@ -1344,6 +1340,5 @@ Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit.`
     console.error("Webhook error:", err);
   }
 
-  // Always 200 so Meta doesn't retry endlessly
   return new Response("ok", { status: 200 });
 }
