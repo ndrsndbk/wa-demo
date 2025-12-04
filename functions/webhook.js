@@ -1,4 +1,3 @@
-
 // Cloudflare Pages Function: WhatsApp Stamp Card Demo
 // No external npm deps; Supabase via REST; WhatsApp Cloud API for messaging.
 
@@ -702,6 +701,212 @@ Respond *STAMP* to claim your first stamp.`
   return true;
 }
 
+// ---------- EDUSAFE Incident Report Flow ----------
+
+async function startEduSafeFlow(env, customerId) {
+  const body = `🛟 *Incident Report*
+
+Hi! Would you like to log an incident?`;
+  await sendInteractiveButtons(env, customerId, body, [
+    { id: "edu_yes", title: "YES" },
+    { id: "edu_no", title: "NO" },
+  ]);
+  await setState(env, customerId, "edusafe", 1);
+}
+
+async function handleEduInteractive(env, customerId, replyId) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "edusafe") return false;
+
+  // Step 1: Yes / No
+  if (st.step === 1) {
+    if (replyId === "edu_no") {
+      await sendText(
+        env,
+        customerId,
+        `👍 No problem.
+
+If you need to log something later, just send *EDUSAFE*.`
+      );
+      await clearState(env, customerId);
+      return true;
+    }
+
+    if (replyId === "edu_yes") {
+      await sendInteractiveButtons(
+        env,
+        customerId,
+        `🚨 *Incident Type*
+
+What type of incident is it?`,
+        [
+          { id: "edu_type_critical", title: "Critical" },
+          { id: "edu_type_noise", title: "Noise" },
+          { id: "edu_type_minor", title: "Minor" },
+        ]
+      );
+      await setState(env, customerId, "edusafe", 2);
+      return true;
+    }
+
+    return false;
+  }
+
+  // Step 2: Incident type selection
+  if (st.step === 2) {
+    let incidentType = null;
+
+    if (replyId === "edu_type_critical") incidentType = "critical";
+    if (replyId === "edu_type_noise") incidentType = "noise";
+    if (replyId === "edu_type_minor") incidentType = "minor";
+
+    if (!incidentType) return false;
+
+    await sbInsert(env, "incident_reports", [
+      {
+        customer_id: customerId,
+        incident_type: incidentType,
+        status: "awaiting_media",
+      },
+    ]);
+
+    if (incidentType === "noise") {
+      await sendText(
+        env,
+        customerId,
+        `🔊 *Noise Complaint*
+
+Please reply with a *voice note* explaining the noise (location, time, and any details).`
+      );
+    } else if (incidentType === "critical") {
+      await sendText(
+        env,
+        customerId,
+        `📸 *Critical Incident*
+
+Please send a *photo* of the incident (if it is safe to do so).`
+      );
+    } else {
+      await sendText(
+        env,
+        customerId,
+        `📝 *Minor Issue / Near Miss*
+
+Please reply with a short *text description* of the incident.`
+      );
+    }
+
+    await setState(env, customerId, "edusafe", 3);
+    return true;
+  }
+
+  // Step 4: Team leader selection
+  if (st.step === 4) {
+    const map = {
+      edu_leader_A: "Leader A",
+      edu_leader_B: "Leader B",
+      edu_leader_C: "Leader C",
+    };
+    const leader = map[replyId];
+    if (!leader) return false;
+
+    const incident = await sbSelectOne(
+      env,
+      "incident_reports",
+      `customer_id=eq.${encodeURIComponent(
+        customerId
+      )}&status=eq.${encodeURIComponent("awaiting_leader")}&order=created_at.desc`,
+      "id"
+    );
+
+    if (incident?.id) {
+      await sbUpdate(
+        env,
+        "incident_reports",
+        `id=eq.${encodeURIComponent(incident.id)}`,
+        {
+          team_leader: leader,
+          status: "logged",
+        }
+      );
+    }
+
+    await sendText(
+      env,
+      customerId,
+      `✅ *Incident Logged*
+
+Thank you — your report has been recorded. 🙏`
+    );
+    await clearState(env, customerId);
+    return true;
+  }
+
+  return false;
+}
+
+async function handleEduMedia(env, customerId, message) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "edusafe" || st.step !== 3) return false;
+
+  const incident = await sbSelectOne(
+    env,
+    "incident_reports",
+    `customer_id=eq.${encodeURIComponent(
+      customerId
+    )}&status=eq.${encodeURIComponent("awaiting_media")}&order=created_at.desc`,
+    "id"
+  );
+
+  if (!incident?.id) return false;
+
+  const type = message.type;
+  let mediaType = null;
+  let mediaId = null;
+  let description = null;
+
+  if (type === "audio") {
+    mediaType = "audio";
+    mediaId = message.audio?.id || null;
+  } else if (type === "image") {
+    mediaType = "image";
+    mediaId = message.image?.id || null;
+  } else if (type === "text") {
+    mediaType = "none";
+    description = (message.text?.body || "").trim();
+  } else {
+    return false;
+  }
+
+  await sbUpdate(
+    env,
+    "incident_reports",
+    `id=eq.${encodeURIComponent(incident.id)}`,
+    {
+      media_type: mediaType,
+      media_whatsapp_id: mediaId,
+      description: description,
+      status: "awaiting_leader",
+    }
+  );
+
+  await sendInteractiveButtons(
+    env,
+    customerId,
+    `👷 *Team Leader*
+
+Please select the name of your team leader:`,
+    [
+      { id: "edu_leader_A", title: "Leader A" },
+      { id: "edu_leader_B", title: "Leader B" },
+      { id: "edu_leader_C", title: "Leader C" },
+    ]
+  );
+
+  await setState(env, customerId, "edusafe", 4);
+  return true;
+}
+
 // ---------- STAMP handling ----------
 
 async function handleStamp(env, customerId, token) {
@@ -768,15 +973,20 @@ Well done.`
       );
       const streakCardVisits = Math.min(10, next + 1);
       await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
-      await sendInteractiveButtons(env, customerId, `🎉 *Demo complete.*
+      await sendInteractiveButtons(
+        env,
+        customerId,
+        `🎉 *Demo complete.*
 
 Here's the link to share the demo:
 ${shareLink}
 
-What would you like to do next?`, [
-  { id: "more_features", title: "MORE" },
-  { id: "book_meeting", title: "MEETING" }
-]);
+What would you like to do next?`,
+        [
+          { id: "more_features", title: "MORE" },
+          { id: "book_meeting", title: "MEETING" },
+        ]
+      );
 
       await setState(env, customerId, "demo_complete", 0);
       return true;
@@ -892,6 +1102,14 @@ export async function onRequestPost({ request, env }) {
 
     const type = message.type;
 
+    // Handle EDUSAFE media (audio/image) as early as possible
+    if (type === "audio" || type === "image") {
+      if (await handleEduMedia(env, from, message)) {
+        return new Response("ok", { status: 200 });
+      }
+      // fall through for non-EDUSAFE audio/image
+    }
+
     // Interactive: buttons
     if (type === "interactive") {
       const interactive = message.interactive || {};
@@ -900,6 +1118,11 @@ export async function onRequestPost({ request, env }) {
         replyId = interactive.button_reply?.id;
       } else if (interactive.type === "list_reply") {
         replyId = interactive.list_reply?.id;
+      }
+
+      // EDUSAFE interactive handling
+      if (replyId && (await handleEduInteractive(env, from, replyId))) {
+        return new Response("ok", { status: 200 });
       }
 
       if (replyId === "connect_meeting") {
@@ -939,6 +1162,11 @@ export async function onRequestPost({ request, env }) {
       const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
 
+      // EDUSAFE media/text step (minor issue description)
+      if (await handleEduMedia(env, from, message)) {
+        return new Response("ok", { status: 200 });
+      }
+
       if (token === "SIGNUP" || token === "SIGN UP") {
         await resetVisitCount(env, from);
         await resetStreakState(env, from);
@@ -949,6 +1177,12 @@ export async function onRequestPost({ request, env }) {
 
       if (token === "DEMO") {
         await startDemoFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "EDUSAFE") {
+        await clearState(env, from);
+        await startEduSafeFlow(env, from);
         return new Response("ok", { status: 200 });
       }
 
