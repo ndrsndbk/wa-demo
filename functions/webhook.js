@@ -833,4 +833,517 @@ Please reply with a short *text description* of the incident.`
   if (st.step === 4) {
     const map = {
       edu_leader_A: "Leader A",
-      edu_lea_
+      edu_leader_B: "Leader B",
+      edu_leader_C: "Leader C",
+    };
+    const leader = map[replyId];
+    if (!leader) return false;
+
+    const incident = await sbSelectOne(
+      env,
+      "incident_reports",
+      `customer_id=eq.${encodeURIComponent(
+        customerId
+      )}&status=eq.${encodeURIComponent("awaiting_leader")}&order=created_at.desc`,
+      "id"
+    );
+
+    if (incident?.id) {
+      await sbUpdate(
+        env,
+        "incident_reports",
+        `id=eq.${encodeURIComponent(incident.id)}`,
+        {
+          team_leader: leader,
+          status: "logged",
+        }
+      );
+    }
+
+    await sendText(
+      env,
+      customerId,
+      `✅ *Incident Logged*
+
+Thank you — your report has been recorded. 🙏`
+    );
+    await clearState(env, customerId);
+    return true;
+  }
+
+  return false;
+}
+
+async function handleEduMedia(env, customerId, message) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "edusafe" || st.step !== 3) return false;
+
+  const incident = await sbSelectOne(
+    env,
+    "incident_reports",
+    `customer_id=eq.${encodeURIComponent(
+      customerId
+    )}&status=eq.${encodeURIComponent("awaiting_media")}&order=created_at.desc`,
+    "id"
+  );
+
+  if (!incident?.id) return false;
+
+  const type = message.type;
+  let mediaType = null;
+  let mediaId = null;
+  let description = null;
+  let mediaUrl = null;
+
+  // Noise = audio (voice note)
+  if (type === "audio") {
+    mediaType = "audio";
+    mediaId = message.audio?.id || null;
+
+    if (mediaId) {
+      const metaRes = await fetch(
+        `https://graph.facebook.com/v23.0/${mediaId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+          },
+        }
+      );
+
+      if (metaRes.ok) {
+        const metaJson = await metaRes.json();
+        const fileRes = await fetch(metaJson.url);
+        const bytes = await fileRes.arrayBuffer();
+
+        const mime = message.audio?.mime_type || "audio/ogg";
+        const path = `audio/${incident.id}-${Date.now()}.ogg`;
+
+        const url = await sbUploadToStorage(
+          env,
+          "incident-media",
+          path,
+          bytes,
+          mime
+        );
+        mediaUrl = url;
+      }
+    }
+  }
+
+  // Critical = image
+  if (type === "image") {
+    mediaType = "image";
+    mediaId = message.image?.id || null;
+
+    if (mediaId) {
+      const metaRes = await fetch(
+        `https://graph.facebook.com/v23.0/${mediaId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
+          },
+        }
+      );
+
+      if (metaRes.ok) {
+        const metaJson = await metaRes.json();
+        const fileRes = await fetch(metaJson.url);
+        const bytes = await fileRes.arrayBuffer();
+
+        const mime = message.image?.mime_type || "image/jpeg";
+        const ext = mime.includes("png") ? "png" : "jpg";
+        const path = `images/${incident.id}-${Date.now()}.${ext}`;
+
+        const url = await sbUploadToStorage(
+          env,
+          "incident-media",
+          path,
+          bytes,
+          mime
+        );
+        mediaUrl = url;
+      }
+    }
+  }
+
+  // Minor = text only
+  if (type === "text") {
+    mediaType = "none";
+    description = (message.text?.body || "").trim();
+  }
+
+  await sbUpdate(
+    env,
+    "incident_reports",
+    `id=eq.${encodeURIComponent(incident.id)}`,
+    {
+      media_type: mediaType,
+      media_whatsapp_id: mediaId,
+      media_url: mediaUrl,
+      description: description,
+      status: "awaiting_leader",
+    }
+  );
+
+  await sendInteractiveButtons(
+    env,
+    customerId,
+    `👷 *Team Leader*
+
+Please select the name of your team leader:`,
+    [
+      { id: "edu_leader_A", title: "Leader A" },
+      { id: "edu_leader_B", title: "Leader B" },
+      { id: "edu_leader_C", title: "Leader C" },
+    ]
+  );
+
+  await setState(env, customerId, "edusafe", 4);
+  return true;
+}
+
+// ---------- STAMP handling ----------
+
+async function handleStamp(env, customerId, token) {
+  const st = await getState(env, customerId);
+  const inDemoStamp = st.active_flow === "demo_stamp" && st.step === 1;
+  const inDemoAfterFirst = st.active_flow === "demo_after_first_stamp";
+  const inDemoStreak = st.active_flow === "demo_streak";
+
+  if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
+    // allow STAMP even outside strict state for demo
+    if (token !== "STAMP") return false;
+  }
+
+  if (token !== "STAMP") {
+    await sendText(
+      env,
+      customerId,
+      "To continue the demo, type *STAMP* after your ‘purchase’ ☕️"
+    );
+    return true;
+  }
+
+  const row = await sbSelectOne(
+    env,
+    "customers",
+    `customer_id=eq.${encodeURIComponent(customerId)}`,
+    "number_of_visits"
+  );
+
+  const current = row && row.number_of_visits ? Number(row.number_of_visits) : 0;
+  const next = current + 1;
+  const now = new Date().toISOString();
+
+  await sbUpsert(
+    env,
+    "customers",
+    [
+      {
+        customer_id: customerId,
+        number_of_visits: next,
+        last_visit_at: now,
+      },
+    ],
+    "customer_id"
+  );
+
+  if (!inDemoStreak) {
+    const streakUpdate = await updateStreak(env, customerId);
+    await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
+  }
+
+  const shareLink = buildShareLink(env);
+
+  if (inDemoStreak) {
+    const capped = Math.max(1, Math.min(10, next));
+
+    if (next === 5) {
+      await sendText(
+        env,
+        customerId,
+        `Great — you’ve unlocked *double stamps*! 🎉🔥
+
+Well done.`
+      );
+      const streakCardVisits = Math.min(10, next + 1);
+      await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
+      await sendInteractiveButtons(
+        env,
+        customerId,
+        `🎉 *Demo complete.*
+
+Here's the link to share the demo:
+${shareLink}
+
+What would you like to do next?`,
+        [
+          { id: "more_features", title: "MORE" },
+          { id: "book_meeting", title: "MEETING" },
+        ]
+      );
+
+      await setState(env, customerId, "demo_complete", 0);
+      return true;
+    }
+
+    await sendImage(env, customerId, buildCardUrl(env, capped));
+
+    if (next === 2) {
+      await sendText(
+        env,
+        customerId,
+        `Wow — you’re on a *2-day streak* 🙌
+
+Hit a *5-day streak* to unlock double stamps 🔥
+
+Send *STAMP* three more times to reach day 5.
+
+_(Reply with stamp, hit send, repeat x3)_`
+      );
+      await setState(env, customerId, "demo_streak", 2);
+    } else if (next === 3 || next === 4) {
+      await sendText(env, customerId, "Nice! Keep going — send *STAMP* again.");
+      await setState(env, customerId, "demo_streak", next);
+    }
+    return true;
+  }
+
+  const capped = Math.max(1, Math.min(10, next));
+  await sendImage(env, customerId, buildCardUrl(env, capped));
+
+  if (next === 1) {
+    await sendText(
+      env,
+      customerId,
+      `Thanks for visiting 🙌
+
+Now you’ve got your first stamp.
+
+Want to test more features? Reply *MORE*.
+
+Want to explore how this can be applied to your business? Reply *MEETING*.
+
+`
+    );
+    await setState(env, customerId, "demo_after_first_stamp", 1);
+    return true;
+  }
+
+  await sendText(
+    env,
+    customerId,
+    `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
+
+🎉 *Demo complete.* 
+
+Share it with colleagues:
+${shareLink}
+
+Want to test more features? 
+
+Reply *MORE*.`
+  );
+
+  await setState(env, customerId, "demo_complete", 0);
+  return true;
+}
+
+// ---------- GET: webhook verification ----------
+
+export async function onRequestGet({ request, env }) {
+  const url = new URL(request.url);
+  const mode = url.searchParams.get("hub.mode");
+  const token = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge");
+
+  const verifyToken =
+    env.VERIFY_TOKEN || env.WHATSAPP_VERIFY_TOKEN || "myverifytoken";
+
+  if (mode === "subscribe" && token === verifyToken) {
+    return new Response(challenge || "", { status: 200 });
+  }
+  return new Response("forbidden", { status: 403 });
+}
+
+// ---------- POST: handle incoming WhatsApp messages ----------
+
+export async function onRequestPost({ request, env }) {
+  try {
+    const data = await request.json();
+
+    const entry = data.entry?.[0] || {};
+    const changes = entry.changes?.[0] || {};
+    const value = changes.value || {};
+    const message = value.messages?.[0];
+
+    if (!message) {
+      // Likely a status/update webhook without inbound user message
+      return new Response("ignored", { status: 200 });
+    }
+
+    const msgId = message.id;
+    const from = message.from;
+    const contacts = value.contacts || [];
+    const waName = contacts[0]?.profile?.name || null;
+
+    // idempotency
+    if (await alreadyProcessed(env, msgId)) {
+      return new Response("ok", { status: 200 });
+    }
+    await markProcessed(env, msgId);
+
+    await upsertCustomer(env, from, waName);
+
+    const type = message.type;
+
+    // Handle EDUSAFE media (audio/image) as early as possible
+    if (type === "audio" || type === "image") {
+      if (await handleEduMedia(env, from, message)) {
+        return new Response("ok", { status: 200 });
+      }
+      // fall through if not EDUSAFE
+    }
+
+    // Interactive: buttons
+    if (type === "interactive") {
+      const interactive = message.interactive || {};
+      let replyId = null;
+      if (interactive.type === "button_reply") {
+        replyId = interactive.button_reply?.id;
+      } else if (interactive.type === "list_reply") {
+        replyId = interactive.list_reply?.id;
+      }
+
+      // EDUSAFE interactive flow
+      if (replyId && (await handleEduInteractive(env, from, replyId))) {
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "connect_meeting") {
+        await startMeetingFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "connect_demo") {
+        await startDemoFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId && (await handleMeetingServiceReply(env, from, replyId, waName))) {
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "more_streak") {
+        await handleStreakCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "more_dash") {
+        await sendDashboardLink(env, from);
+        await clearState(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId && (await handleSignupInteractiveStep2(env, from, replyId))) {
+        return new Response("ok", { status: 200 });
+      }
+
+      return new Response("ok", { status: 200 });
+    }
+
+    // Text messages
+    if (type === "text") {
+      const raw = (message.text?.body || "").trim();
+      const token = raw.toUpperCase();
+
+      if (token === "SIGNUP" || token === "SIGN UP") {
+        await resetVisitCount(env, from);
+        await resetStreakState(env, from);
+        await clearState(env, from);
+        await startSignupFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "DEMO") {
+        await startDemoFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "EDUSAFE") {
+        await clearState(env, from);
+        await startEduSafeFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // EDUSAFE minor issue description
+      if (await handleEduMedia(env, from, message)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Meeting availability reply
+      if (await handleMeetingTimeText(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Meeting email capture reply
+      if (await handleMeetingEmailText(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Start connect menu
+      if (token === "CONNECT") {
+        await sendConnectMenu(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Meeting branch
+      if (token === "MEETING") {
+        await startMeetingFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Birthday step
+      if (await handleSignupTextStep1(env, from, raw)) {
+        return new Response("ok", { status: 200 });
+      }
+
+      // Streak test entry
+      if (token === "MORE") {
+        await sendMoreMenu(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "STREAK") {
+        await handleStreakCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (token === "DASH") {
+        await sendDashboardLink(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Stamp
+      if (token === "STAMP") {
+        await handleStamp(env, from, token);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Default help
+      await sendText(
+        env,
+        from,
+        `👋 Welcome to the WhatsApp stamp card demo.
+
+Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit.`
+      );
+      return new Response("ok", { status: 200 });
+    }
+  } catch (err) {
+    console.error("Webhook error:", err);
+  }
+
+  // Always 200 so Meta doesn't retry endlessly
+  return new Response("ok", { status: 200 });
+}
