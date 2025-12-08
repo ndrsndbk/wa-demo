@@ -32,112 +32,67 @@ async function sbSelectOne(env, table, filterQuery, columns = "*") {
   );
   if (!res.ok) {
     console.error(
-      `Supabase selectOne ${table} error`,
-      res.status,
+      `Supabase selectOne error: ${res.status} ${res.statusText}`,
       await res.text()
     );
-    return null;
+    throw new Error("Supabase selectOne failed");
   }
   const data = await res.json();
   return data[0] || null;
 }
 
-async function sbInsert(env, table, rows) {
+async function sbUpsert(env, table, row) {
   const { url } = getSupabaseConfig(env);
   const res = await fetch(`${url}/rest/v1/${table}`, {
     method: "POST",
-    headers: sbHeaders(env, { Prefer: "return=minimal" }),
-    body: JSON.stringify(rows),
+    headers: sbHeaders(env, { Prefer: "resolution=merge-duplicates" }),
+    body: JSON.stringify(row),
   });
   if (!res.ok) {
     console.error(
-      `Supabase insert ${table} error`,
-      res.status,
+      `Supabase upsert error: ${res.status} ${res.statusText}`,
       await res.text()
     );
+    throw new Error("Supabase upsert failed");
   }
-}
-
-async function sbUpsert(env, table, rows, keyCols) {
-  const { url } = getSupabaseConfig(env);
-  const onConflict = Array.isArray(keyCols) ? keyCols.join(",") : keyCols;
-  const res = await fetch(
-    `${url}/rest/v1/${table}?on_conflict=${encodeURIComponent(onConflict)}`,
-    {
-      method: "POST",
-      headers: sbHeaders(env, { Prefer: "resolution=merge-duplicates" }),
-      body: JSON.stringify(rows),
-    }
-  );
-  if (!res.ok) {
-    console.error(
-      `Supabase upsert ${table} error`,
-      res.status,
-      await res.text()
-    );
-  }
+  return res.json().catch(() => null);
 }
 
 async function sbUpdate(env, table, filterQuery, patch) {
   const { url } = getSupabaseConfig(env);
   const res = await fetch(`${url}/rest/v1/${table}?${filterQuery}`, {
     method: "PATCH",
-    headers: sbHeaders(env, { Prefer: "return=minimal" }),
+    headers: sbHeaders(env),
     body: JSON.stringify(patch),
   });
   if (!res.ok) {
     console.error(
-      `Supabase update ${table} error`,
-      res.status,
+      `Supabase update error: ${res.status} ${res.statusText}`,
       await res.text()
     );
+    throw new Error("Supabase update failed");
   }
+  return res.json().catch(() => null);
 }
 
-// ---------- Supabase Storage helper ----------
+// ---------- WhatsApp Cloud API helpers ----------
 
-async function sbUploadToStorage(env, bucket, path, bytes, contentType) {
-  const { url, key } = getSupabaseConfig(env);
-
-  const res = await fetch(`${url}/storage/v1/object/${bucket}/${path}`, {
-    method: "POST",
-    headers: {
-      apikey: key,
-      Authorization: `Bearer ${key}`,
-      "Content-Type": contentType || "application/octet-stream",
-    },
-    body: bytes,
-  });
-
-  if (!res.ok) {
-    console.error(
-      `Supabase storage upload error`,
-      res.status,
-      await res.text()
-    );
-    return null;
-  }
-
-  const publicUrl = `${url}/storage/v1/object/public/${bucket}/${path}`;
-  return publicUrl;
-}
-
-// ---------- WhatsApp helpers ----------
-
-function getPhoneNumberId(env) {
-  return env.PHONE_NUMBER_ID || "858272234034248";
-}
-
-async function sendWhatsApp(env, payload) {
+function getWhatsAppConfig(env) {
   const token = env.WHATSAPP_TOKEN;
-  const phoneNumberId = getPhoneNumberId(env);
-  if (!token || !phoneNumberId) {
-    console.error("Missing WHATSAPP_TOKEN or PHONE_NUMBER_ID");
-    return;
+  const phoneId = env.WHATSAPP_PHONE_ID;
+  if (!token || !phoneId) {
+    throw new Error("Missing WHATSAPP_TOKEN or WHATSAPP_PHONE_ID");
   }
+  return {
+    token,
+    phoneId,
+    apiUrl: `https://graph.facebook.com/v20.0/${phoneId}/messages`,
+  };
+}
 
-  const url = `https://graph.facebook.com/v23.0/${phoneNumberId}/messages`;
-  const res = await fetch(url, {
+async function sendWhatsAppRequest(env, payload) {
+  const { token, apiUrl } = getWhatsAppConfig(env);
+  const res = await fetch(apiUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
@@ -145,37 +100,39 @@ async function sendWhatsApp(env, payload) {
     },
     body: JSON.stringify(payload),
   });
-
-  const text = await res.text();
   if (!res.ok) {
-    console.error("[WA SEND] error", res.status, text);
-  } else {
-    console.log("[WA SEND] ok", res.status, text);
+    const body = await res.text();
+    console.error(
+      "WhatsApp send error:",
+      res.status,
+      res.statusText,
+      body.slice(0, 500)
+    );
+    throw new Error("WhatsApp message send failed");
   }
+  return res.json().catch(() => null);
 }
 
-function sendText(env, to, body) {
-  return sendWhatsApp(env, {
+async function sendText(env, to, text) {
+  return sendWhatsAppRequest(env, {
     messaging_product: "whatsapp",
     to,
     type: "text",
-    text: { body },
+    text: { preview_url: false, body: text },
   });
 }
 
-function sendImage(env, to, link, caption) {
-  const image = { link };
-  if (caption) image.caption = caption;
-  return sendWhatsApp(env, {
+async function sendImage(env, to, imageUrl, caption) {
+  return sendWhatsAppRequest(env, {
     messaging_product: "whatsapp",
     to,
     type: "image",
-    image,
+    image: caption ? { link: imageUrl, caption } : { link: imageUrl },
   });
 }
 
-function sendInteractiveButtons(env, to, bodyText, buttons) {
-  return sendWhatsApp(env, {
+async function sendInteractiveButtons(env, to, bodyText, buttons) {
+  return sendWhatsAppRequest(env, {
     messaging_product: "whatsapp",
     to,
     type: "interactive",
@@ -192,1153 +149,834 @@ function sendInteractiveButtons(env, to, bodyText, buttons) {
   });
 }
 
-// ---------- Card URL helpers ----------
-
-function buildCardUrl(env, visits) {
-  const base =
-    env.CARDS_BASE_URL ||
-    "https://lhbtgjvejsnsrlstwlwl.supabase.co/storage/v1/object/public/cards";
-  const version = env.CARDS_VERSION || "v1";
-  const prefix = env.CARD_PREFIX || "Demo_Shop_";
-  const v = Math.max(
-    0,
-    Math.min(10, Number.isNaN(Number(visits)) ? 0 : Number(visits))
-  );
-  return `${base}/${version}/${prefix}${v}.png`;
+async function sendInteractiveList(env, to, bodyText, sections) {
+  return sendWhatsAppRequest(env, {
+    messaging_product: "whatsapp",
+    to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text: bodyText },
+      action: {
+        button: "Options",
+        sections,
+      },
+    },
+  });
 }
 
-function getZeroCardUrl(env) {
-  return env.STAMP_CARD_ZERO_URL || buildCardUrl(env, 0);
-}
+// ---------- State helpers (Supabase tables) ----------
 
-// ---------- Idempotency: processed_events ----------
-
-async function alreadyProcessed(env, messageId) {
-  if (!messageId) return false;
-  const row = await sbSelectOne(
+async function getCustomer(env, waId) {
+  return sbSelectOne(
     env,
-    "processed_events",
-    `message_id=eq.${encodeURIComponent(messageId)}`,
-    "message_id"
+    "customers",
+    `wa_id=eq.${encodeURIComponent(waId)}`
   );
-  return !!row;
 }
 
-async function markProcessed(env, messageId) {
-  if (!messageId) return;
-  await sbInsert(env, "processed_events", [{ message_id: messageId }]);
+async function ensureCustomer(env, waId, waName) {
+  let c = await getCustomer(env, waId);
+  if (!c) {
+    const row = {
+      wa_id: waId,
+      wa_name: waName || null,
+      created_at: new Date().toISOString(),
+    };
+    await sbUpsert(env, "customers", row);
+    c = await getCustomer(env, waId);
+  }
+  return c;
 }
 
-// ---------- Conversation state: conversation_state ----------
-
-async function getState(env, customerId) {
-  const row = await sbSelectOne(
-    env,
-    "conversation_state",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "active_flow,step"
-  );
-  if (!row) return { active_flow: null, step: 0 };
-  return row;
+async function getState(env, waId) {
+  return sbSelectOne(env, "states", `wa_id=eq.${encodeURIComponent(waId)}`);
 }
 
-async function setState(env, customerId, flow, step = 0) {
-  const payload = {
-    customer_id: customerId,
-    active_flow: flow,
+async function setState(env, waId, flow, step, extra = {}) {
+  const row = {
+    wa_id: waId,
+    flow,
     step,
+    data: extra,
     updated_at: new Date().toISOString(),
   };
-  await sbUpsert(env, "conversation_state", [payload], "customer_id");
+  await sbUpsert(env, "states", row);
 }
 
-async function clearState(env, customerId) {
-  await setState(env, customerId, null, 0);
-}
-
-// ---------- Customers table helpers ----------
-
-async function upsertCustomer(env, customerId, profileName) {
-  const now = new Date().toISOString();
-  const existing = await sbSelectOne(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "customer_id"
-  );
-
-  if (existing) {
-    await sbUpdate(
-      env,
-      "customers",
-      `customer_id=eq.${encodeURIComponent(customerId)}`,
-      { last_seen_at: now, profile_name: profileName }
+async function clearState(env, waId) {
+  const { url } = getSupabaseConfig(env);
+  const filterQuery = `wa_id=eq.${encodeURIComponent(waId)}`;
+  const res = await fetch(`${url}/rest/v1/states?${filterQuery}`, {
+    method: "DELETE",
+    headers: sbHeaders(env),
+  });
+  if (!res.ok) {
+    console.error(
+      `Supabase delete state error: ${res.status} ${res.statusText}`,
+      await res.text()
     );
-  } else {
-    await sbInsert(env, "customers", [
-      {
-        customer_id: customerId,
-        profile_name: profileName,
-        created_at: now,
-        last_seen_at: now,
-      },
-    ]);
   }
 }
 
-async function setCustomerBirthday(env, customerId, birthdayIso) {
-  await sbUpdate(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    { birthday: birthdayIso }
-  );
+// ---------- Demo stamp card logic ----------
+
+function buildCardUrl(env, stamps) {
+  const base = env.CARD_BASE_URL || "";
+  return `${base}/card?stamps=${stamps}`;
 }
 
-async function setCustomerPreferredDrink(env, customerId, drink) {
-  await sbUpdate(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    { preferred_drink: drink }
-  );
+async function recordVisit(env, waId) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(`${url}/rest/v1/visits`, {
+    method: "POST",
+    headers: sbHeaders(env),
+    body: JSON.stringify({
+      wa_id: waId,
+      visited_at: new Date().toISOString(),
+    }),
+  });
+  if (!res.ok) {
+    console.error(
+      "Supabase recordVisit error:",
+      res.status,
+      res.statusText,
+      await res.text()
+    );
+  }
 }
 
-async function resetVisitCount(env, customerId) {
-  await sbUpsert(
-    env,
-    "customers",
-    [{ customer_id: customerId, number_of_visits: 0, last_visit_at: null }],
-    "customer_id"
-  );
-}
-
-async function resetStreakState(env, customerId) {
-  await sbUpsert(
-    env,
-    "customer_streaks",
-    [
-      {
-        customer_id: customerId,
-        streak_count: 0,
-        last_visit_date: null,
-        two_day_sent: false,
-        five_day_sent: false,
-      },
-    ],
-    "customer_id"
-  );
-}
-
-// ---------- Streak helpers ----------
-
-function getTodayIsoDate() {
-  const now = new Date();
-  const y = now.getUTCFullYear();
-  const m = String(now.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(now.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function dayDiff(fromDate, toDate) {
-  const a = new Date(`${fromDate}T00:00:00Z`);
-  const b = new Date(`${toDate}T00:00:00Z`);
-  const diff = (b - a) / (1000 * 60 * 60 * 24);
-  return Math.round(diff);
-}
-
-async function updateStreak(env, customerId) {
-  const today = getTodayIsoDate();
-  const row = await sbSelectOne(
-    env,
-    "customer_streaks",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "customer_id,streak_count,last_visit_date,two_day_sent,five_day_sent"
-  );
-
-  let streak = 1;
-  let twoSent = row?.two_day_sent === true;
-  let fiveSent = row?.five_day_sent === true;
-
-  if (row) {
-    const lastDate = row.last_visit_date || today;
-    const diff = dayDiff(lastDate, today);
-
-    if (diff === 0) {
-      streak = row.streak_count || 1;
-    } else if (diff === 1) {
-      streak = (row.streak_count || 1) + 1;
-    } else {
-      streak = 1;
+async function getVisitCount(env, waId) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/visits?wa_id=eq.${encodeURIComponent(
+      waId
+    )}&select=count`,
+    {
+      method: "GET",
+      headers: sbHeaders(env),
     }
-  }
-
-  await sbUpsert(
-    env,
-    "customer_streaks",
-    [
-      {
-        customer_id: customerId,
-        streak_count: streak,
-        last_visit_date: today,
-        two_day_sent: twoSent,
-        five_day_sent: fiveSent,
-      },
-    ],
-    "customer_id"
   );
-
-  return { streak, twoSent, fiveSent };
+  if (!res.ok) {
+    console.error(
+      "Supabase getVisitCount error:",
+      res.status,
+      res.statusText,
+      await res.text()
+    );
+    return 0;
+  }
+  const data = await res.json();
+  if (!Array.isArray(data) || !data[0] || typeof data[0].count !== "number") {
+    return 0;
+  }
+  return data[0].count;
 }
 
-async function maybeSendStreakMilestones(env, customerId, streak, flags) {
-  if (streak === 2 && !flags.twoSent) {
+async function resetVisitCount(env, waId) {
+  const { url } = getSupabaseConfig(env);
+  const filterQuery = `wa_id=eq.${encodeURIComponent(waId)}`;
+  const res = await fetch(`${url}/rest/v1/visits?${filterQuery}`, {
+    method: "DELETE",
+    headers: sbHeaders(env),
+  });
+  if (!res.ok) {
+    console.error(
+      "Supabase resetVisitCount error:",
+      res.status,
+      res.statusText,
+      await res.text()
+    );
+  }
+}
+
+// Streak tracking in separate table
+async function getStreakState(env, waId) {
+  return sbSelectOne(env, "streaks", `wa_id=eq.${encodeURIComponent(waId)}`);
+}
+
+async function setStreakState(env, waId, streak, lastVisitIso) {
+  const row = {
+    wa_id: waId,
+    streak,
+    last_visit_at: lastVisitIso,
+    updated_at: new Date().toISOString(),
+  };
+  await sbUpsert(env, "streaks", row);
+}
+
+async function resetStreakState(env, waId) {
+  const { url } = getSupabaseConfig(env);
+  const filterQuery = `wa_id=eq.${encodeURIComponent(waId)}`;
+  const res = await fetch(`${url}/rest/v1/streaks?${filterQuery}`, {
+    method: "DELETE",
+    headers: sbHeaders(env),
+  });
+  if (!res.ok) {
+    console.error(
+      "Supabase resetStreakState error:",
+      res.status,
+      res.statusText,
+      await res.text()
+    );
+  }
+}
+
+// Will be expanded: meeting bookings, dashboards, etc.
+
+// ---------- Meeting booking helpers ----------
+
+async function startMeetingFlow(env, waId) {
+  await setState(env, waId, "meeting", 1);
+  await sendText(
+    env,
+    waId,
+    `📅 *Book a meeting*
+
+Reply with a time window that suits you (e.g. "Tuesday morning" or "Any day after 3pm"). I'll send a link to pick a slot.`
+  );
+}
+
+async function handleMeetingServiceReply(env, waId, replyId, waName) {
+  if (replyId === "meeting_service_whatsapp") {
     await sendText(
       env,
-      customerId,
-      "You’re on a 2-day streak… hit 5 and get double stamps!"
+      waId,
+      `Great, I'll book through WhatsApp. 
+For now, here's a Calendly link (placeholder) to pick a time:
+
+https://calendly.com/thepotentialcompany/meta-loyalty-demo`
     );
-    await sbUpdate(
-      env,
-      "customer_streaks",
-      `customer_id=eq.${encodeURIComponent(customerId)}`,
-      { two_day_sent: true }
-    );
-  }
-
-  if (streak === 5 && !flags.fiveSent) {
-    await sendText(env, customerId, "🔥 5-day streak! You’ve earned a reward.");
-    await sbUpdate(
-      env,
-      "customer_streaks",
-      `customer_id=eq.${encodeURIComponent(customerId)}`,
-      { five_day_sent: true }
-    );
-  }
-}
-
-// ---------- Birthday parsing ----------
-
-function parseBirthday(raw) {
-  if (!raw) return null;
-  const s = raw.trim();
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (m) return s;
-  return null;
-}
-
-// ---------- SIGNUP flow ----------
-
-async function startSignupFlow(env, customerId, waName) {
-  const msg = `Hey${waName ? `, ${waName}` : ""}! 👋
-
-_Two quick questions to set up your stamp card_ ⚡
-
- 1️⃣ When’s your birthday?
-e.g. 1993-02-07
-
-_(you get a free drink on your birthday)_`;
-  await sendText(env, customerId, msg);
-  await setState(env, customerId, "signup", 1);
-}
-
-async function handleSignupTextStep1(env, customerId, text) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "signup" || st.step !== 1) return false;
-
-  const iso = parseBirthday(text);
-  const birthdayValue = iso || text.trim();
-  await setCustomerBirthday(env, customerId, birthdayValue);
-
-  await sendInteractiveButtons(env, customerId, "2️⃣ Which drink do you prefer?", [
-    { id: "drink_matcha", title: "Matcha" },
-    { id: "drink_americano", title: "Americano" },
-    { id: "drink_cappuccino", title: "Cappuccino" },
-  ]);
-
-  await setState(env, customerId, "signup", 2);
-  return true;
-}
-
-// ---------- Connect & branching flows ----------
-
-function buildShareLink(env) {
-  if (env.SHARE_LINK) return env.SHARE_LINK;
-  return "https://wa.me/84764929881?text=DEMO";
-}
-
-function getWebsiteUrl(env) {
-  return env.WEBSITE_URL || "https://thepotentialcompany.com";
-}
-
-function getDashboardUrl(env) {
-  return (
-    env.DASHBOARD_URL ||
-    env.REPORT_URL ||
-    "https://ndrsndbk.github.io/stamp-card-dashboard/"
-  );
-}
-
-async function sendConnectMenu(env, to, waName) {
-  const body = `Hi${waName ? ` ${waName}` : ""}! 🤝
-
-Thanks for connecting.
-
-_We help businesses grow with custom Meta loyalty systems, digital products, and strategic advisory_
-
-Would you like to book a *meeting* or *try a demo*?`;
-
-  await sendInteractiveButtons(env, to, body, [
-    { id: "connect_meeting", title: "MEETING" },
-    { id: "connect_demo", title: "DEMO" },
-  ]);
-}
-
-async function startMeetingFlow(env, customerId) {
-  await sendInteractiveButtons(
-    env,
-    customerId,
-    "Which bespoke service are you most interested in?",
-    [
-      { id: "meeting_meta", title: "META SYSTEMS" },
-      { id: "meeting_apps", title: "APPS & AUTOMATIONS" },
-      { id: "meeting_advisory", title: "STRATEGIC ADVISORY" },
-    ]
-  );
-  await setState(env, customerId, "meeting", 1);
-}
-
-async function logMeetingSelection(env, customerId, waName, selected) {
-  const now = new Date().toISOString();
-  await sbInsert(env, "meeting_requests", [
-    {
-      customer_id: customerId,
-      wa_name: waName || null,
-      service_selected: selected,
-      status: "service_selected",
-      created_at: now,
-      updated_at: now,
-    },
-  ]);
-}
-
-async function getLatestMeetingRequest(env, customerId) {
-  return await sbSelectOne(
-    env,
-    "meeting_requests",
-    `customer_id=eq.${encodeURIComponent(
-      customerId
-    )}&status=eq.${encodeURIComponent("service_selected")}&order=created_at.desc`,
-    "id"
-  );
-}
-
-async function updateMeetingRequestTime(env, customerId, rawText) {
-  const latest = await getLatestMeetingRequest(env, customerId);
-  const now = new Date().toISOString();
-
-  if (latest?.id) {
-    await sbUpdate(
-      env,
-      "meeting_requests",
-      `id=eq.${encodeURIComponent(latest.id)}`,
-      { requested_time_text: rawText, status: "time_proposed", updated_at: now }
-    );
-    return;
-  }
-
-  await sbInsert(env, "meeting_requests", [
-    {
-      customer_id: customerId,
-      requested_time_text: rawText,
-      status: "time_proposed",
-      created_at: now,
-      updated_at: now,
-    },
-  ]);
-}
-
-async function updateMeetingRequestEmail(env, customerId, emailText) {
-  const latest = await getLatestMeetingRequest(env, customerId);
-  const now = new Date().toISOString();
-
-  if (latest?.id) {
-    await sbUpdate(
-      env,
-      "meeting_requests",
-      `id=eq.${encodeURIComponent(latest.id)}`,
-      { email: emailText, status: "email_captured", updated_at: now }
-    );
-    return;
-  }
-
-  await sbInsert(env, "meeting_requests", [
-    {
-      customer_id: customerId,
-      email: emailText,
-      status: "email_captured",
-      created_at: now,
-      updated_at: now,
-    },
-  ]);
-}
-
-async function handleMeetingServiceReply(env, customerId, replyId, waName) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "meeting" || st.step !== 1) return false;
-
-  const map = {
-    meeting_meta: "Meta Systems",
-    meeting_apps: "Applications / Automation",
-    meeting_advisory: "Strategic Advisory",
-  };
-  const selected = map[replyId];
-  if (!selected) return false;
-
-  await logMeetingSelection(env, customerId, waName, selected);
-
-  await sendText(
-    env,
-    customerId,
-    `Awesome! We’ll focus on *${selected}*.
-
-Which day + time suits you? 📅 (e.g. Tue 3pm or 12 Jun 10:00)`
-  );
-
-  await setState(env, customerId, `meeting_${replyId}`, 2);
-  return true;
-}
-
-async function handleMeetingTimeText(env, customerId, rawText) {
-  const st = await getState(env, customerId);
-  if (!st.active_flow?.startsWith("meeting_") || st.step !== 2) return false;
-
-  const serviceKey = st.active_flow.replace("meeting_", "");
-  const map = {
-    meta: "Meta Systems",
-    apps: "Applications / Automation",
-    advisory: "Strategic Advisory",
-  };
-  const selected = map[serviceKey] || "our services";
-
-  await updateMeetingRequestTime(env, customerId, rawText);
-
-  await sendText(
-    env,
-    customerId,
-    `Nice! We’ll pencil in *${rawText}* for *${selected}*.
-
-_Final step:_ ⚡
-
-Please reply with your email address so we can book the meeting.`
-  );
-
-  await setState(env, customerId, `meeting_${serviceKey}`, 3);
-  return true;
-}
-
-async function handleMeetingEmailText(env, customerId, rawText) {
-  const st = await getState(env, customerId);
-  if (!st.active_flow?.startsWith("meeting_") || st.step !== 3) return false;
-
-  await updateMeetingRequestEmail(env, customerId, rawText);
-
-  await sendText(
-    env,
-    customerId,
-    `Thanks! You’re all set — we’ll reach out soon to confirm details.
-
-In the meantime, you can:
-• Send *DEMO* to test our Meta Systems
-• Or visit ${getWebsiteUrl(env)} for explainer videos`
-  );
-
-  await clearState(env, customerId);
-  return true;
-}
-
-async function startDemoFlow(env, customerId, waName) {
-  const intro = `Here’s a demo of a *Meta Loyalty System*: the *WhatsApp Stamp Card* 👇
-
-_Imagine a customer walks into a coffee shop and scans a QR._
-
-Then they get sent this message:
-
-Send *SIGNUP* to get your stamp card. 🙂 `;
-  await sendText(env, customerId, intro);
-  await setState(env, customerId, "demo_intro", 0);
-}
-
-async function sendMoreMenu(env, customerId) {
-  const body = `Want to try more features? Pick an option:
-
-🔥 Reply *STREAK* to test gamification.
-
-📊 Reply *DASH* to see the manager dashboard.`;
-  await sendInteractiveButtons(env, customerId, body, [
-    { id: "more_streak", title: "STREAK" },
-    { id: "more_dash", title: "DASH" },
-  ]);
-  await setState(env, customerId, "more", 1);
-}
-
-async function sendDashboardLink(env, customerId) {
-  await sendText(
-    env,
-    customerId,
-    `Here’s the dashboard link:
-${getDashboardUrl(env)}
-
-It updates in real-time during the demo.
-
-More content about us is here: ${getWebsiteUrl(env)}`
-  );
-}
-
-async function handleStreakCommand(env, customerId) {
-  await sendText(
-    env,
-    customerId,
-    `Let’s test streak gamification 🔥 
-
-A streak means visiting multiple days in a row.
-
-Send *STAMP* to make another “purchase”.`
-  );
-  await setState(env, customerId, "demo_streak", 1);
-}
-
-async function handleSignupInteractiveStep2(env, customerId, replyId) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "signup" || st.step !== 2) return false;
-
-  const map = {
-    drink_matcha: "matcha",
-    drink_americano: "americano",
-    drink_cappuccino: "cappuccino",
-  };
-  const drink = map[replyId];
-  if (!drink) return false;
-
-  await setCustomerPreferredDrink(env, customerId, drink);
-
-  await sendText(
-    env,
-    customerId,
-    "Nice choice 😎 Here’s your digital stamp card:"
-  );
-  await sendImage(env, customerId, getZeroCardUrl(env));
-
-  await sendText(
-    env,
-    customerId,
-    `Now imagine you’ve just bought a coffee ☕️
-
-Respond *STAMP* to claim your first stamp.`
-  );
-
-  await setState(env, customerId, "demo_stamp", 1);
-  return true;
-}
-
-// ---------- EDUSAFE Incident Report Flow ----------
-
-async function startEduSafeFlow(env, customerId) {
-  const body = `🛟 *Incident Report*
-
-Hi! Would you like to log an incident?`;
-  await sendInteractiveButtons(env, customerId, body, [
-    { id: "edu_yes", title: "YES" },
-    { id: "edu_no", title: "NO" },
-  ]);
-  await setState(env, customerId, "edusafe", 1);
-}
-
-async function handleEduInteractive(env, customerId, replyId) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "edusafe") return false;
-
-  if (st.step === 1) {
-    if (replyId === "edu_no") {
-      await sendText(
-        env,
-        customerId,
-        `👍 No problem.
-
-If you need to log something later, just send *EDUSAFE*.`
-      );
-      await clearState(env, customerId);
-      return true;
-    }
-
-    if (replyId === "edu_yes") {
-      await sendInteractiveButtons(
-        env,
-        customerId,
-        `🚨 *Incident Type*
-
-What type of incident is it?`,
-        [
-          { id: "edu_type_critical", title: "Critical" },
-          { id: "edu_type_noise", title: "Noise" },
-          { id: "edu_type_minor", title: "Minor" },
-        ]
-      );
-      await setState(env, customerId, "edusafe", 2);
-      return true;
-    }
-
-    return false;
-  }
-
-  if (st.step === 2) {
-    let incidentType = null;
-
-    if (replyId === "edu_type_critical") incidentType = "critical";
-    if (replyId === "edu_type_noise") incidentType = "noise";
-    if (replyId === "edu_type_minor") incidentType = "minor";
-
-    if (!incidentType) return false;
-
-    await sbInsert(env, "incident_reports", [
-      {
-        customer_id: customerId,
-        incident_type: incidentType,
-        status: "awaiting_media",
-      },
-    ]);
-
-    if (incidentType === "noise") {
-      await sendText(
-        env,
-        customerId,
-        `🔊 *Noise Complaint*
-
-Please reply with a *voice note* explaining the noise (location, time, and any details).`
-      );
-    } else if (incidentType === "critical") {
-      await sendText(
-        env,
-        customerId,
-        `📸 *Critical Incident*
-
-Please send a *photo* of the incident (if it is safe to do so).`
-      );
-    } else {
-      await sendText(
-        env,
-        customerId,
-        `📝 *Minor Issue / Near Miss*
-
-Please reply with a short *text description* of the incident.`
-      );
-    }
-
-    await setState(env, customerId, "edusafe", 3);
+    await clearState(env, waId);
     return true;
   }
 
-  if (st.step === 4) {
-    const map = {
-      edu_leader_A: "Leader A",
-      edu_leader_B: "Leader B",
-      edu_leader_C: "Leader C",
-    };
-    const leader = map[replyId];
-    if (!leader) return false;
-
-    const incident = await sbSelectOne(
-      env,
-      "incident_reports",
-      `customer_id=eq.${encodeURIComponent(
-        customerId
-      )}&status=eq.${encodeURIComponent("awaiting_leader")}&order=created_at.desc`,
-      "id"
-    );
-
-    if (incident?.id) {
-      await sbUpdate(
-        env,
-        "incident_reports",
-        `id=eq.${encodeURIComponent(incident.id)}`,
-        {
-          team_leader: leader,
-          status: "logged",
-        }
-      );
-    }
-
+  if (replyId === "meeting_service_google") {
     await sendText(
       env,
-      customerId,
-      `✅ *Incident Logged*
+      waId,
+      `Great, I'll send a Google Meet invite.
+For now, here's a Calendly link (placeholder) to pick a time:
 
-Thank you — your report has been recorded. 🙏`
+https://calendly.com/thepotentialcompany/meta-loyalty-demo`
     );
-    await clearState(env, customerId);
+    await clearState(env, waId);
     return true;
   }
 
   return false;
 }
 
-async function handleEduMedia(env, customerId, message) {
-  const st = await getState(env, customerId);
-  if (st.active_flow !== "edusafe" || st.step !== 3) return false;
-
-  const incident = await sbSelectOne(
-    env,
-    "incident_reports",
-    `customer_id=eq.${encodeURIComponent(
-      customerId
-    )}&status=eq.${encodeURIComponent("awaiting_media")}&order=created_at.desc`,
-    "id"
-  );
-
-  if (!incident?.id) return false;
-
-  const type = message.type;
-  let mediaType = null;
-  let mediaId = null;
-  let description = null;
-  let mediaUrl = null;
-
-  if (type === "audio") {
-    mediaType = "audio";
-    mediaId = message.audio?.id || null;
-
-    if (mediaId) {
-      const metaRes = await fetch(
-        `https://graph.facebook.com/v23.0/${mediaId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
-          },
-        }
-      );
-
-      if (metaRes.ok) {
-        const metaJson = await metaRes.json();
-        const fileRes = await fetch(metaJson.url, {
-          headers: {
-            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
-          },
-        });
-        const bytes = await fileRes.arrayBuffer();
-
-        const mime = message.audio?.mime_type || "audio/ogg";
-        const path = `audio/${incident.id}-${Date.now()}.ogg`;
-
-        const url = await sbUploadToStorage(
-          env,
-          "incident-media",
-          path,
-          bytes,
-          mime
-        );
-        mediaUrl = url;
-      }
-    }
-  }
-
-  if (type === "image") {
-    mediaType = "image";
-    mediaId = message.image?.id || null;
-
-    if (mediaId) {
-      const metaRes = await fetch(
-        `https://graph.facebook.com/v23.0/${mediaId}`,
-        {
-          headers: {
-            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
-          },
-        }
-      );
-
-      if (metaRes.ok) {
-        const metaJson = await metaRes.json();
-        const fileRes = await fetch(metaJson.url, {
-          headers: {
-            Authorization: `Bearer ${env.WHATSAPP_TOKEN}`,
-          },
-        });
-        const bytes = await fileRes.arrayBuffer();
-
-        const mime = message.image?.mime_type || "image/jpeg";
-        const ext = mime.includes("png") ? "png" : "jpg";
-        const path = `images/${incident.id}-${Date.now()}.${ext}`;
-
-        const url = await sbUploadToStorage(
-          env,
-          "incident-media",
-          path,
-          bytes,
-          mime
-        );
-        mediaUrl = url;
-      }
-    }
-  }
-
-  if (type === "text") {
-    mediaType = "none";
-    description = (message.text?.body || "").trim();
-  }
-
-  await sbUpdate(
-    env,
-    "incident_reports",
-    `id=eq.${encodeURIComponent(incident.id)}`,
-    {
-      media_type: mediaType,
-      media_whatsapp_id: mediaId,
-      media_url: mediaUrl,
-      description: description,
-      status: "awaiting_leader",
-    }
-  );
-
+async function sendMeetingServiceOptions(env, waId, waName) {
   await sendInteractiveButtons(
     env,
-    customerId,
-    `👷 *Team Leader*
-
-Please select the name of your team leader:`,
+    waId,
+    `How would you like to meet?`,
     [
-      { id: "edu_leader_A", title: "Leader A" },
-      { id: "edu_leader_B", title: "Leader B" },
-      { id: "edu_leader_C", title: "Leader C" },
+      { id: "meeting_service_whatsapp", title: "WhatsApp Call" },
+      { id: "meeting_service_google", title: "Google Meet" },
     ]
   );
-
-  await setState(env, customerId, "edusafe", 4);
-  return true;
 }
 
-// ---------- STAMP handling ----------
+// ---------- "More" menu helpers ----------
 
-async function handleStamp(env, customerId, token) {
-  const st = await getState(env, customerId);
-  const inDemoStamp = st.active_flow === "demo_stamp" && st.step === 1;
-  const inDemoAfterFirst = st.active_flow === "demo_after_first_stamp";
-  const inDemoStreak = st.active_flow === "demo_streak";
+async function sendMoreMenu(env, waId) {
+  await sendInteractiveButtons(
+    env,
+    waId,
+    `What would you like to see next?`,
+    [
+      { id: "more_streak", title: "Streak Demo" },
+      { id: "more_dash", title: "Dashboard" },
+    ]
+  );
+}
 
-  if (!inDemoStamp && !inDemoAfterFirst && !inDemoStreak) {
-    if (token !== "STAMP") return false;
-  }
+// ---------- Signup flow helpers ----------
 
-  if (token !== "STAMP") {
+async function startSignupFlow(env, waId, waName) {
+  await setState(env, waId, "signup", 1, {});
+  await sendText(
+    env,
+    waId,
+    `Awesome ${waName || ""}! Let's set up a quick demo profile.
+
+What's the *name of your business*?`
+  );
+}
+
+async function handleSignupStep(env, waId, text, waName) {
+  const st = await getState(env, waId);
+  if (!st || st.flow !== "signup") return false;
+
+  const step = st.step || 1;
+  const data = st.data || {};
+
+  if (step === 1) {
+    data.business_name = text;
+    await setState(env, waId, "signup", 2, data);
     await sendText(
       env,
-      customerId,
-      "To continue the demo, type *STAMP* after your ‘purchase’ ☕️"
+      waId,
+      `Nice. Which *industry* best describes your business? (e.g. "Coffee shop", "Restaurant", "Gym")`
     );
     return true;
   }
 
-  const row = await sbSelectOne(
-    env,
-    "customers",
-    `customer_id=eq.${encodeURIComponent(customerId)}`,
-    "number_of_visits"
-  );
-
-  const current = row && row.number_of_visits ? Number(row.number_of_visits) : 0;
-  const next = current + 1;
-  const now = new Date().toISOString();
-
-  await sbUpsert(
-    env,
-    "customers",
-    [
-      {
-        customer_id: customerId,
-        number_of_visits: next,
-        last_visit_at: now,
-      },
-    ],
-    "customer_id"
-  );
-
-  if (!inDemoStreak) {
-    const streakUpdate = await updateStreak(env, customerId);
-    await maybeSendStreakMilestones(env, customerId, streakUpdate.streak, streakUpdate);
+  if (step === 2) {
+    data.industry = text;
+    await setState(env, waId, "signup", 3, data);
+    await sendText(
+      env,
+      waId,
+      `Thanks! Roughly how many *customers per month* do you serve?`
+    );
+    return true;
   }
 
-  const shareLink = buildShareLink(env);
+  if (step === 3) {
+    data.customer_volume = text;
+    await setState(env, waId, "signup", 4, data);
+    await sendText(
+      env,
+      waId,
+      `Got it. Last question: what's your *best contact email*?`
+    );
+    return true;
+  }
 
-  if (inDemoStreak) {
-    const capped = Math.max(1, Math.min(10, next));
+  if (step === 4) {
+    data.email = text;
+    await setState(env, waId, "signup", 5, data);
 
-    if (next === 5) {
-      await sendText(
-        env,
-        customerId,
-        `Great — you’ve unlocked *double stamps*! 🎉🔥
+    const { url } = getSupabaseConfig(env);
+    await fetch(`${url}/rest/v1/signup_leads`, {
+      method: "POST",
+      headers: sbHeaders(env),
+      body: JSON.stringify({
+        wa_id: waId,
+        wa_name: waName || null,
+        business_name: data.business_name || null,
+        industry: data.industry || null,
+        customer_volume: data.customer_volume || null,
+        email: data.email || null,
+        created_at: new Date().toISOString(),
+      }),
+    }).catch((err) => console.error("signup_leads insert error", err));
 
-Well done.`
-      );
-      const streakCardVisits = Math.min(10, next + 1);
-      await sendImage(env, customerId, buildCardUrl(env, streakCardVisits));
-      await sendInteractiveButtons(
-        env,
-        customerId,
-        `🎉 *Demo complete.*
+    await sendText(
+      env,
+      waId,
+      `✅ Thanks! You're all set.
+
+I'll follow up soon with a personalised demo and next steps.`
+    );
+    await clearState(env, waId);
+    return true;
+  }
+
+  return false;
+}
+
+async function handleSignupInteractiveStep2(env, waId, replyId) {
+  if (!replyId || !replyId.startsWith("signup_industry_")) return false;
+  const industry = replyId.replace("signup_industry_", "").replace(/_/g, " ");
+
+  const st = await getState(env, waId);
+  if (!st || st.flow !== "signup") return false;
+  const data = st.data || {};
+  data.industry = industry;
+
+  await setState(env, waId, "signup", 3, data);
+  await sendText(
+    env,
+    waId,
+    `Got it. Roughly how many *customers per month* do you serve?`
+  );
+  return true;
+}
+
+// ---------- Streak demo helpers ----------
+
+async function handleStreakCommand(env, waId) {
+  await recordVisit(env, waId);
+
+  const visits = await getVisitCount(env, waId);
+  const stamps = Math.min(10, visits);
+
+  const shareLink = `https://wa.me/${waId}?text=DEMO`;
+
+  await sendImage(env, waId, buildCardUrl(env, stamps));
+
+  const streakState = await getStreakState(env, waId);
+  const now = new Date();
+  const lastVisit = streakState?.last_visit_at
+    ? new Date(streakState.last_visit_at)
+    : null;
+
+  let newStreak = 1;
+
+  if (lastVisit) {
+    const diffMs = now - lastVisit;
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+
+    if (diffDays < 2) {
+      newStreak = (streakState?.streak || 0) + 1;
+    } else {
+      newStreak = 1;
+    }
+  }
+
+  await setStreakState(env, waId, newStreak, now.toISOString());
+
+  if (newStreak > 1) {
+    await sendText(
+      env,
+      waId,
+      `🔥 You're on a streak: *${newStreak} visits* in a row!
+
+(Imagine we trigger this automatically when your customers visit multiple times in a short period.)`
+    );
+  } else {
+    await sendText(
+      env,
+      waId,
+      `Thanks for visiting again! You've now stamped your card *${stamps}* time(s).
+
+(For real customers, we'd track this automatically from your POS or ordering system.)`
+    );
+  }
+
+  if (visits >= 10) {
+    await sendText(
+      env,
+      waId,
+      `🎁 In a real system, you'd now unlock a *free coffee* or chosen reward.
+
+Here it's just a demo – but this is how the logic would work.`
+    );
+  }
+
+  await sendInteractiveButtons(env, waId, `What would you like to do next?`, [
+    { id: "more_streak", title: "Streak again" },
+    { id: "more_dash", title: "Dashboard" },
+  ]);
+}
+
+// ---------- Dashboard helpers ----------
+
+async function sendDashboardLink(env, waId) {
+  const dashboardUrl =
+    env.DASHBOARD_URL ||
+    "https://tpc-demo-dashboard.pages.dev/demo-dashboard";
+  await sendText(
+    env,
+    waId,
+    `📊 Here's a simple *demo dashboard* that could connect to your loyalty system:
+
+${dashboardUrl}
+
+(Imagine this being your real-time view of visits, streaks, and rewards.)`
+  );
+}
+
+// ---------- Edu content helpers ----------
+
+async function handleEduMedia(env, waId, message) {
+  if (message.type !== "text") return false;
+  const text = (message.text?.body || "").trim().toUpperCase();
+  if (text !== "EDU") return false;
+
+  const yt = env.EDU_YT_URL || "https://youtu.be/nX5SfBdnHHU";
+  const yt2 = env.EDU_YT2_URL || "https://youtu.be/px87QNYduwI";
+
+  await sendText(
+    env,
+    waId,
+    `🎓 *Meta Loyalty Systems – Product Videos*
+
+1️⃣ Overview: ${yt}
+2️⃣ Stamp card & gamification: ${yt2}
+
+(Short videos showing how the system works from both the customer and owner side.)`
+  );
+  return true;
+}
+
+async function handleEduInteractive(env, waId, replyId) {
+  if (!replyId?.startsWith("edu_")) return false;
+
+  const yt = env.EDU_YT_URL || "https://youtu.be/nX5SfBdnHHU";
+  const yt2 = env.EDU_YT2_URL || "https://youtu.be/px87QNYduwI";
+
+  if (replyId === "edu_overview") {
+    await sendText(env, waId, `Overview video:\n${yt}`);
+    return true;
+  }
+  if (replyId === "edu_stamp") {
+    await sendText(env, waId, `Stamp card & gamification:\n${yt2}`);
+    return true;
+  }
+
+  return false;
+}
+
+// ---------- Demo flow helpers ----------
+
+async function startDemoFlow(env, waId, waName) {
+  await ensureCustomer(env, waId, waName);
+  await resetVisitCount(env, waId);
+  await resetStreakState(env, waId);
+  await clearState(env, waId);
+
+  await sendText(
+    env,
+    waId,
+    `👋 *Welcome to the Meta Loyalty Stamp-Card Demo.*
+
+We'll simulate a simple coffee shop:
+- Each visit = 1 stamp
+- 10 stamps = 1 free coffee
+- We'll also show how we could detect *streaks* (multiple visits in a short time) and surprise customers with extra rewards.
+
+Reply *VISIT* to simulate a customer visit.`
+  );
+
+  await sendImage(env, waId, buildCardUrl(env, 0));
+  await setState(env, waId, "demo", 0, {});
+}
+
+async function handleDemoVisit(env, waId, text) {
+  const token = text.trim().toUpperCase();
+  if (token !== "VISIT") return false;
+
+  const st = await getState(env, waId);
+  if (!st || st.flow !== "demo") {
+    return false;
+  }
+
+  await recordVisit(env, waId);
+  const visits = await getVisitCount(env, waId);
+
+  const stamps = Math.min(10, visits);
+  await sendImage(env, waId, buildCardUrl(env, stamps));
+
+  if (visits < 10) {
+    await sendText(
+      env,
+      waId,
+      `Nice! You've now got *${stamps}* stamp(s) on your card.
+
+Reply *VISIT* again to simulate another visit.`
+    );
+  } else {
+    await sendText(
+      env,
+      waId,
+      `🎉 You've reached *10 stamps* – in a real system, you'd now unlock a free coffee or reward.
+
+Next, we'll show how streaks and surprise bonuses could work. Reply *STREAK* to continue.`
+    );
+    await setState(env, waId, "demo_streak_intro", 0, {});
+  }
+
+  return true;
+}
+
+async function handleDemoStreakIntro(env, waId, text) {
+  const token = text.trim().toUpperCase();
+  if (token !== "STREAK") return false;
+
+  const st = await getState(env, waId);
+  if (!st || st.flow !== "demo_streak_intro") return false;
+
+  await sendText(
+    env,
+    waId,
+    `Great. Now we'll pretend this customer keeps visiting regularly.
+
+We'll simulate visits and show how a *streak* can trigger extra rewards or personalised messages.
+
+Reply *GO* to simulate the streak visits.`
+  );
+
+  await setState(env, waId, "demo_streak", 0, {});
+  return true;
+}
+
+async function handleDemoStreak(env, waId, text) {
+  const token = text.trim().toUpperCase();
+  if (token !== "GO") return false;
+
+  const st = await getState(env, waId);
+  if (!st || st.flow !== "demo_streak") return false;
+
+  const visits = await getVisitCount(env, waId);
+  const next = visits + 1;
+
+  await recordVisit(env, waId);
+
+  const cardVisits = Math.min(10, next);
+  await sendImage(env, waId, buildCardUrl(env, cardVisits));
+
+  const streakState = await getStreakState(env, waId);
+  const now = new Date();
+  const lastVisit = streakState?.last_visit_at
+    ? new Date(streakState.last_visit_at)
+    : null;
+
+  let newStreak = 1;
+  if (lastVisit) {
+    const diffMs = now - lastVisit;
+    const diffDays = diffMs / (1000 * 60 * 60 * 24);
+    if (diffDays < 2) {
+      newStreak = (streakState?.streak || 0) + 1;
+    } else {
+      newStreak = 1;
+    }
+  }
+  await setStreakState(env, waId, newStreak, now.toISOString());
+
+  const shareLink = `https://wa.me/${waId}?text=DEMO`;
+
+  if (newStreak >= 3) {
+    await sendText(
+      env,
+      waId,
+      `🔥 This customer has visited *${newStreak} times in a row*.
+
+We could:
+- send them double stamps,
+- invite them to try a new menu item,
+- or simply say "thanks" in a personalised way.`
+    );
+  } else {
+    await sendText(
+      env,
+      waId,
+      `Visit recorded. Streaks are how we detect your most engaged customers – a bit like Netflix tracking how often you watch a show.`
+    );
+  }
+
+  if (next >= 5) {
+    const streakCardVisits = Math.min(10, next + 1);
+    await sendImage(env, waId, buildCardUrl(env, streakCardVisits));
+    await sendInteractiveButtons(
+      env,
+      waId,
+      `🎉 *Demo complete.*
 
 Here's the link to share the demo:
 ${shareLink}
 
 What would you like to do next?`,
-        [
-          { id: "more_features", title: "MORE" },
-          { id: "book_meeting", title: "MEETING" },
-        ]
-      );
+      [
+        { id: "more_features", title: "MORE" },
+        { id: "book_meeting", title: "MEETING" },
+      ]
+    );
 
-      await setState(env, customerId, "demo_complete", 0);
-      return true;
-    }
-
-    await sendImage(env, customerId, buildCardUrl(env, capped));
-
-    if (next === 2) {
-      await sendText(
-        env,
-        customerId,
-        `Wow — you’re on a *2-day streak* 🙌
-
-Hit a *5-day streak* to unlock double stamps 🔥
-
-Send *STAMP* three more times to reach day 5.
-
-_(Reply with stamp, hit send, repeat x3)_`
-      );
-      await setState(env, customerId, "demo_streak", 2);
-    } else if (next === 3 || next === 4) {
-      await sendText(env, customerId, "Nice! Keep going — send *STAMP* again.");
-      await setState(env, customerId, "demo_streak", next);
-    }
-    return true;
-  }
-
-  const capped = Math.max(1, Math.min(10, next));
-  await sendImage(env, customerId, buildCardUrl(env, capped));
-
-  if (next === 1) {
+    await setState(env, waId, "demo_complete", 0, {});
+  } else {
     await sendText(
       env,
-      customerId,
-      `Thanks for visiting 🙌
-
-Now you’ve got your first stamp.
-
-Want to test more features? Reply *MORE*.
-
-Want to explore how this can be applied to your business? Reply *MEETING*.
-
-`
+      waId,
+      `Reply *GO* again to simulate more streak visits.`
     );
-    await setState(env, customerId, "demo_after_first_stamp", 1);
-    return true;
+    await setState(env, waId, "demo_streak", next, {});
   }
 
-  await sendText(
-    env,
-    customerId,
-    `Thanks for ‘visiting’ 🙌 You now have a stamp on your demo card.
-
-🎉 *Demo complete.* 
-
-Share it with colleagues:
-${shareLink}
-
-Want to test more features? 
-
-Reply *MORE*.`
-  );
-
-  await setState(env, customerId, "demo_complete", 0);
   return true;
 }
 
-// ---------- GET: webhook verification ----------
+// ---------- Main handler ----------
 
-export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
-  const mode = url.searchParams.get("hub.mode");
-  const token = url.searchParams.get("hub.verify_token");
-  const challenge = url.searchParams.get("hub.challenge");
+export default {
+  async onRequestPost({ request, env }) {
+    try {
+      const data = await request.json();
 
-  const verifyToken =
-    env.VERIFY_TOKEN || env.WHATSAPP_VERIFY_TOKEN || "myverifytoken";
+      const entry = data.entry?.[0] || {};
+      const changes = entry.changes?.[0] || {};
+      const value = changes.value || {};
+      const message = value.messages?.[0];
 
-  if (mode === "subscribe" && token === verifyToken) {
-    return new Response(challenge || "", { status: 200 });
-  }
-  return new Response("forbidden", { status: 403 });
-}
+      if (!message) {
+        return new Response("ignored", { status: 200 });
+      }
 
-// ---------- POST: handle incoming WhatsApp messages ----------
+      const msgId = message.id;
+      const from = message.from;
+      const contacts = value.contacts || [];
+      const profile = contacts[0]?.profile || {};
+      const waName = profile.name || null;
 
-export async function onRequestPost({ request, env }) {
-  try {
-    const data = await request.json();
+      const type = message.type;
 
-    const entry = data.entry?.[0] || {};
-    const changes = entry.changes?.[0] || {};
-    const value = changes.value || {};
-    const message = value.messages?.[0];
+      await ensureCustomer(env, from, waName);
 
-    if (!message) {
-      return new Response("ignored", { status: 200 });
-    }
+      if (type === "text") {
+        if (await handleEduMedia(env, from, message)) {
+          return new Response("ok", { status: 200 });
+        }
+      }
 
-    const msgId = message.id;
-    const from = message.from;
-    const contacts = value.contacts || [];
-    const waName = contacts[0]?.profile?.name || null;
+      if (type === "interactive") {
+        const interactive = message.interactive || {};
+        let replyId = null;
+        if (interactive.type === "button_reply") {
+          replyId = interactive.button_reply?.id;
+        } else if (interactive.type === "list_reply") {
+          replyId = interactive.list_reply?.id;
+        }
 
-    if (await alreadyProcessed(env, msgId)) {
+        if (replyId && (await handleEduInteractive(env, from, replyId))) {
+          return new Response("ok", { status: 200 });
+        }
+
+        if (replyId === "connect_meeting") {
+          await startMeetingFlow(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (replyId === "connect_demo") {
+          await startDemoFlow(env, from, waName);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (
+          replyId &&
+          (await handleMeetingServiceReply(env, from, replyId, waName))
+        ) {
+          return new Response("ok", { status: 200 });
+        }
+
+        if (replyId === "more_streak") {
+          await handleStreakCommand(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (replyId === "more_dash") {
+          await sendDashboardLink(env, from);
+          await clearState(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        // NEW: handle buttons from the "Demo complete" card
+        if (replyId === "more_features") {
+          await sendMoreMenu(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (replyId === "book_meeting") {
+          await startMeetingFlow(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (
+          replyId &&
+          (await handleSignupInteractiveStep2(env, from, replyId))
+        ) {
+          return new Response("ok", { status: 200 });
+        }
+
+        return new Response("ok", { status: 200 });
+      }
+
+      if (type === "text") {
+        const raw = (message.text?.body || "").trim();
+        const token = raw.toUpperCase();
+
+        if (token === "SIGNUP" || token === "SIGN UP") {
+          await resetVisitCount(env, from);
+          await resetStreakState(env, from);
+          await clearState(env, from);
+          await startSignupFlow(env, from, waName);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (token === "DEMO") {
+          await startDemoFlow(env, from, waName);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (token === "VISIT") {
+          if (await handleDemoVisit(env, from, raw)) {
+            return new Response("ok", { status: 200 });
+          }
+        }
+
+        if (token === "STREAK") {
+          if (await handleDemoStreakIntro(env, from, raw)) {
+            return new Response("ok", { status: 200 });
+          }
+        }
+
+        if (token === "GO") {
+          if (await handleDemoStreak(env, from, raw)) {
+            return new Response("ok", { status: 200 });
+          }
+        }
+
+        if (token === "MEETING") {
+          await startMeetingFlow(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (token === "MORE") {
+          await sendMoreMenu(env, from);
+          return new Response("ok", { status: 200 });
+        }
+
+        if (await handleSignupStep(env, from, raw, waName)) {
+          return new Response("ok", { status: 200 });
+        }
+
+        const st = await getState(env, from);
+        if (st?.flow === "meeting" && st.step === 1) {
+          await sendMeetingServiceOptions(env, from, waName);
+          await setState(env, from, "meeting", 2, {
+            window: raw,
+          });
+          return new Response("ok", { status: 200 });
+        }
+
+        await sendText(
+          env,
+          from,
+          `Hi ${
+            waName || ""
+          } 👋
+
+This is a demo of *Meta Loyalty Systems* – stamp cards, streak-based rewards, and dashboards built on WhatsApp.
+
+Reply:
+- *DEMO* to see the stamp card demo
+- *SIGNUP* if you're a business owner wanting a tailored walkthrough
+- *EDU* for short explainer videos
+`
+        );
+        return new Response("ok", { status: 200 });
+      }
+
       return new Response("ok", { status: 200 });
+    } catch (err) {
+      console.error("webhook error:", err);
+      return new Response("error", { status: 500 });
     }
-    await markProcessed(env, msgId);
+  },
 
-    await upsertCustomer(env, from, waName);
+  async onRequestGet({ request, env }) {
+    const url = new URL(request.url);
+    const mode = url.searchParams.get("mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
 
-    const type = message.type;
-
-    if (type === "audio" || type === "image") {
-      if (await handleEduMedia(env, from, message)) {
-        return new Response("ok", { status: 200 });
-      }
-    }
-
-    if (type === "interactive") {
-      const interactive = message.interactive || {};
-      let replyId = null;
-      if (interactive.type === "button_reply") {
-        replyId = interactive.button_reply?.id;
-      } else if (interactive.type === "list_reply") {
-        replyId = interactive.list_reply?.id;
-      }
-
-      if (replyId && (await handleEduInteractive(env, from, replyId))) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId === "connect_meeting") {
-        await startMeetingFlow(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId === "connect_demo") {
-        await startDemoFlow(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId && (await handleMeetingServiceReply(env, from, replyId, waName))) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId === "more_streak") {
-        await handleStreakCommand(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId === "more_dash") {
-        await sendDashboardLink(env, from);
-        await clearState(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (replyId && (await handleSignupInteractiveStep2(env, from, replyId))) {
-        return new Response("ok", { status: 200 });
-      }
-
-      return new Response("ok", { status: 200 });
+    if (mode === "subscribe" && token === env.WHATSAPP_VERIFY_TOKEN) {
+      return new Response(challenge, { status: 200 });
     }
 
-    if (type === "text") {
-      const raw = (message.text?.body || "").trim();
-      const token = raw.toUpperCase();
-
-      if (token === "SIGNUP" || token === "SIGN UP") {
-        await resetVisitCount(env, from);
-        await resetStreakState(env, from);
-        await clearState(env, from);
-        await startSignupFlow(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "DEMO") {
-        await startDemoFlow(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "EDUSAFE") {
-        await clearState(env, from);
-        await startEduSafeFlow(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (await handleEduMedia(env, from, message)) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (await handleMeetingTimeText(env, from, raw)) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (await handleMeetingEmailText(env, from, raw)) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "CONNECT") {
-        await sendConnectMenu(env, from, waName);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "MEETING") {
-        await startMeetingFlow(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (await handleSignupTextStep1(env, from, raw)) {
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "MORE") {
-        await sendMoreMenu(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "STREAK") {
-        await handleStreakCommand(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "DASH") {
-        await sendDashboardLink(env, from);
-        return new Response("ok", { status: 200 });
-      }
-
-      if (token === "STAMP") {
-        await handleStamp(env, from, token);
-        return new Response("ok", { status: 200 });
-      }
-
-      await sendText(
-        env,
-        from,
-        `👋 Welcome to the WhatsApp stamp card demo.
-
-Type *CONNECT* to see options, *DEMO* to start, or *STAMP* after a visit.`
-      );
-      return new Response("ok", { status: 200 });
-    }
-  } catch (err) {
-    console.error("Webhook error:", err);
-  }
-
-  return new Response("ok", { status: 200 });
-}
+    return new Response("forbidden", { status: 403 });
+  },
+};
