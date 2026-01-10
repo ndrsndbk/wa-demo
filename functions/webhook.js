@@ -122,6 +122,480 @@ async function sbUploadToStorage(env, bucket, path, bytes, contentType) {
   return publicUrl;
 }
 
+// ---------- Weekly Reflection Log System ----------
+
+// ISO week number calculation
+function getISOWeek(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 4 - (d.getDay() || 7));
+  const yearStart = new Date(d.getFullYear(), 0, 1);
+  const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return weekNo;
+}
+
+function getLogDate() {
+  // Use Asia/Ho_Chi_Minh timezone (UTC+7)
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const hcmTime = new Date(utc + (3600000 * 7));
+  const y = hcmTime.getFullYear();
+  const m = String(hcmTime.getMonth() + 1).padStart(2, "0");
+  const d = String(hcmTime.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// Log session management
+async function getLogSession(env, waFrom) {
+  return await sbSelectOne(
+    env,
+    "log_sessions",
+    `wa_from=eq.${encodeURIComponent(waFrom)}`,
+    "id,wa_from,status,current_week,created_at,updated_at"
+  );
+}
+
+async function upsertLogSession(env, waFrom, status, week = null) {
+  const now = new Date().toISOString();
+  const payload = {
+    wa_from: waFrom,
+    status: status,
+    last_prompted_at: now,
+    updated_at: now,
+  };
+  if (week !== null) {
+    payload.current_week = week;
+  }
+  await sbUpsert(env, "log_sessions", [payload], "wa_from");
+}
+
+// Download WhatsApp media
+async function downloadWhatsAppMedia(env, mediaId) {
+  const token = env.WHATSAPP_TOKEN;
+
+  // Step 1: Get media metadata
+  const metaRes = await fetch(
+    `https://graph.facebook.com/v23.0/${mediaId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    }
+  );
+
+  if (!metaRes.ok) {
+    console.error("[WA MEDIA] metadata error", metaRes.status, await metaRes.text());
+    return null;
+  }
+
+  const metaJson = await metaRes.json();
+  const mediaUrl = metaJson.url;
+  const mimeType = metaJson.mime_type || "audio/ogg";
+
+  // Step 2: Download media bytes
+  const fileRes = await fetch(mediaUrl, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!fileRes.ok) {
+    console.error("[WA MEDIA] download error", fileRes.status, await fileRes.text());
+    return null;
+  }
+
+  const bytes = await fileRes.arrayBuffer();
+  return { bytes, mimeType };
+}
+
+// Transcribe audio using Grok (xAI) API - FREE!
+async function transcribeAudio(env, audioBytes, mimeType) {
+  // Try Grok first (xAI API), fall back to OpenAI if needed
+  const grokApiKey = env.XAI_API_KEY || env.GROK_API_KEY;
+  const openaiApiKey = env.OPENAI_API_KEY;
+
+  if (!grokApiKey && !openaiApiKey) {
+    console.error("[TRANSCRIBE] Missing XAI_API_KEY or OPENAI_API_KEY");
+    return { success: false, error: "Missing transcription API key" };
+  }
+
+  // Try Grok first (free transcription)
+  if (grokApiKey) {
+    try {
+      console.log("[TRANSCRIBE] Using Grok (xAI) for transcription");
+
+      // Convert audio to base64 for Grok API
+      const base64Audio = btoa(
+        new Uint8Array(audioBytes).reduce((data, byte) => data + String.fromCharCode(byte), '')
+      );
+
+      const res = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${grokApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "grok-beta",
+          messages: [
+            {
+              role: "system",
+              content: "You are an audio transcription assistant. Transcribe the audio accurately. Return ONLY the transcribed text, nothing else."
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: "Please transcribe this audio file accurately. Return only the transcribed text."
+                },
+                {
+                  type: "audio",
+                  audio: {
+                    data: base64Audio,
+                    format: mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp3") ? "mp3" : "m4a"
+                  }
+                }
+              ]
+            }
+          ],
+          temperature: 0.1,
+        }),
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        const transcript = json.choices?.[0]?.message?.content || "";
+
+        if (transcript) {
+          console.log("[TRANSCRIBE] Grok transcription successful");
+          return {
+            success: true,
+            transcript: transcript.trim(),
+            model: "grok-beta",
+            transcribed_at: new Date().toISOString(),
+          };
+        }
+      }
+
+      console.log("[TRANSCRIBE] Grok failed, trying OpenAI...", res.status);
+    } catch (grokErr) {
+      console.error("[TRANSCRIBE] Grok exception, trying OpenAI:", grokErr.message);
+    }
+  }
+
+  // Fallback to OpenAI Whisper
+  if (openaiApiKey) {
+    try {
+      console.log("[TRANSCRIBE] Using OpenAI Whisper for transcription");
+
+      const formData = new FormData();
+      const ext = mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp3") ? "mp3" : "m4a";
+      const blob = new Blob([audioBytes], { type: mimeType });
+      formData.append("file", blob, `audio.${ext}`);
+      formData.append("model", "whisper-1");
+      formData.append("language", "en");
+      formData.append("response_format", "json");
+
+      const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiApiKey}`,
+        },
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error("[TRANSCRIBE] OpenAI error", res.status, errText);
+        return { success: false, error: `OpenAI API error: ${res.status}` };
+      }
+
+      const json = await res.json();
+      return {
+        success: true,
+        transcript: json.text || "",
+        model: "whisper-1",
+        transcribed_at: new Date().toISOString(),
+      };
+    } catch (err) {
+      console.error("[TRANSCRIBE] OpenAI exception:", err);
+      return { success: false, error: err.message };
+    }
+  }
+
+  return { success: false, error: "All transcription methods failed" };
+}
+
+// Structure transcript using Grok or OpenAI - FREE with Grok!
+async function structureTranscript(env, transcript) {
+  const grokApiKey = env.XAI_API_KEY || env.GROK_API_KEY;
+  const openaiApiKey = env.OPENAI_API_KEY;
+
+  if (!grokApiKey && !openaiApiKey) {
+    console.error("[STRUCTURE] Missing XAI_API_KEY or OPENAI_API_KEY");
+    return { notes: transcript };
+  }
+
+  const systemPrompt = `You are an AI that structures weekly reflection logs in the style of Ray Dalio's error logs.
+Given a transcript, extract and categorize information into these fields:
+- wins: notable successes
+- challenges: difficulties faced
+- key_learnings: main lessons learned
+- errors_gaps: mistakes or gaps identified
+- improvements: areas to improve
+- systems_process: process or system insights
+- emotional_state: emotional or mental state observations
+- strategic_insight: strategic or big-picture thinking
+- actions_next_week: planned actions for next week
+- notes: anything that doesn't fit above
+
+Return valid JSON with these keys. If a category has no content, use empty string.`;
+
+  // Try Grok first (free)
+  if (grokApiKey) {
+    try {
+      console.log("[STRUCTURE] Using Grok for structuring");
+
+      const res = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${grokApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "grok-beta",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: transcript },
+          ],
+          temperature: 0.3,
+        }),
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        const content = json.choices?.[0]?.message?.content;
+        if (content) {
+          // Try to extract JSON from response
+          const jsonMatch = content.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const structured = JSON.parse(jsonMatch[0]);
+            console.log("[STRUCTURE] Grok structuring successful");
+            return structured;
+          }
+        }
+      }
+
+      console.log("[STRUCTURE] Grok failed, trying OpenAI...", res.status);
+    } catch (grokErr) {
+      console.error("[STRUCTURE] Grok exception, trying OpenAI:", grokErr.message);
+    }
+  }
+
+  // Fallback to OpenAI
+  if (openaiApiKey) {
+    try {
+      console.log("[STRUCTURE] Using OpenAI for structuring");
+
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openaiApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: transcript },
+          ],
+          response_format: { type: "json_object" },
+          temperature: 0.3,
+        }),
+      });
+
+      if (!res.ok) {
+        console.error("[STRUCTURE] OpenAI error", res.status, await res.text());
+        return { notes: transcript };
+      }
+
+      const json = await res.json();
+      const content = json.choices?.[0]?.message?.content;
+      if (!content) {
+        return { notes: transcript };
+      }
+
+      const structured = JSON.parse(content);
+      return structured;
+    } catch (err) {
+      console.error("[STRUCTURE] OpenAI exception:", err);
+      return { notes: transcript };
+    }
+  }
+
+  return { notes: transcript };
+}
+
+// Save weekly reflection log
+async function saveWeeklyLog(env, waFrom, transcript, audioPath, audioUrl, structuredJson) {
+  const logDate = getLogDate();
+  const weekNumber = getISOWeek(new Date(logDate));
+  const now = new Date().toISOString();
+
+  const row = {
+    wa_from: waFrom,
+    log_date: logDate,
+    week_number: weekNumber,
+    transcript_text: transcript,
+    audio_storage_path: audioPath,
+    audio_url: audioUrl,
+    structured_json: structuredJson,
+    created_at: now,
+  };
+
+  await sbInsert(env, "weekly_reflection_logs", [row]);
+  return { logDate, weekNumber };
+}
+
+// Main handler for log command
+async function handleLogCommand(env, waFrom) {
+  const logDate = getLogDate();
+  const weekNumber = getISOWeek(new Date(logDate));
+
+  await upsertLogSession(env, waFrom, "awaiting_audio", weekNumber);
+
+  await sendText(
+    env,
+    waFrom,
+    `Got it. Please reply with a voice note for your weekly reflection (2–6 min). When you send it, I'll transcribe and save it.`
+  );
+}
+
+// Main handler for audio in log flow
+async function handleLogAudio(env, waFrom, message) {
+  // Check session status
+  const session = await getLogSession(env, waFrom);
+  if (!session || session.status !== "awaiting_audio") {
+    await sendText(env, waFrom, "Send 'log' first to start a weekly log.");
+    return false;
+  }
+
+  const mediaId = message.audio?.id;
+  if (!mediaId) {
+    await sendText(env, waFrom, "Could not find audio in your message. Please send a voice note.");
+    return false;
+  }
+
+  await sendText(env, waFrom, "Received your voice note. Processing...");
+
+  try {
+    // Step 1: Download audio
+    const media = await downloadWhatsAppMedia(env, mediaId);
+    if (!media) {
+      await sendText(env, waFrom, "Failed to download audio. Please try again.");
+      return false;
+    }
+
+    // Step 2: Store in Supabase Storage
+    const logDate = getLogDate();
+    const timestamp = Date.now();
+    const ext = media.mimeType.includes("ogg") ? "ogg" : media.mimeType.includes("mp3") ? "mp3" : "m4a";
+    const storagePath = `${waFrom}/${logDate}/${timestamp}_${mediaId}.${ext}`;
+
+    const audioUrl = await sbUploadToStorage(
+      env,
+      "weekly-logs",
+      storagePath,
+      media.bytes,
+      media.mimeType
+    );
+
+    if (!audioUrl) {
+      await sendText(env, waFrom, "Failed to store audio. Please contact support.");
+      return false;
+    }
+
+    // Step 3: Transcribe
+    const transcription = await transcribeAudio(env, media.bytes, media.mimeType);
+    if (!transcription.success) {
+      await sendText(
+        env,
+        waFrom,
+        `Transcription failed: ${transcription.error}. Audio saved at ${audioUrl}`
+      );
+      return false;
+    }
+
+    const transcript = transcription.transcript;
+
+    // Step 4: Structure the transcript
+    const structuredJson = await structureTranscript(env, transcript);
+
+    // Step 5: Save to database
+    try {
+      const { logDate: savedDate, weekNumber } = await saveWeeklyLog(
+        env,
+        waFrom,
+        transcript,
+        storagePath,
+        audioUrl,
+        structuredJson
+      );
+
+      // Step 6: Confirm to user
+      await sendText(
+        env,
+        waFrom,
+        `Logged ✅ Week ${weekNumber} (${savedDate}). Want to add anything else? Send another voice note or reply 'done'.`
+      );
+
+      // Keep session in awaiting_audio state to allow multiple voice notes
+      return true;
+    } catch (dbErr) {
+      console.error("[LOG SAVE] Database error:", dbErr);
+
+      // Fallback: save to failed_log_inserts table
+      try {
+        await sbInsert(env, "failed_log_inserts", [
+          {
+            wa_from: waFrom,
+            transcript_text: transcript,
+            audio_storage_path: storagePath,
+            audio_url: audioUrl,
+            structured_json: structuredJson,
+            error_message: dbErr.message || "Database insert failed",
+            created_at: new Date().toISOString(),
+          },
+        ]);
+      } catch (failErr) {
+        console.error("[FAILED_LOG_INSERTS] Failed to save to failsafe table:", failErr);
+      }
+
+      await sendText(
+        env,
+        waFrom,
+        `Transcript saved but database insert failed. Your reflection:\n\n"${transcript.substring(0, 200)}..."\n\nPlease contact support.`
+      );
+      return false;
+    }
+  } catch (err) {
+    console.error("[LOG AUDIO] Unexpected error:", err);
+    await sendText(env, waFrom, "An unexpected error occurred. Please try again.");
+    return false;
+  }
+}
+
+async function handleLogDone(env, waFrom) {
+  const session = await getLogSession(env, waFrom);
+  if (session && session.status === "awaiting_audio") {
+    await upsertLogSession(env, waFrom, "idle");
+    await sendText(env, waFrom, "All set! Your weekly reflections have been logged. 📝");
+    return true;
+  }
+  return false;
+}
+
 // ---------- WhatsApp helpers ----------
 
 function getPhoneNumberId(env) {
@@ -1207,6 +1681,15 @@ export async function onRequestPost({ request, env }) {
 
     const type = message.type;
 
+    // Handle audio for log flow FIRST (higher priority)
+    if (type === "audio") {
+      const session = await getLogSession(env, from);
+      if (session && session.status === "awaiting_audio") {
+        await handleLogAudio(env, from, message);
+        return new Response("ok", { status: 200 });
+      }
+    }
+
     if (type === "audio" || type === "image") {
       if (await handleEduMedia(env, from, message)) {
         return new Response("ok", { status: 200 });
@@ -1272,6 +1755,19 @@ export async function onRequestPost({ request, env }) {
     if (type === "text") {
       const raw = (message.text?.body || "").trim();
       const token = raw.toUpperCase();
+
+      // Handle LOG command
+      if (token === "LOG") {
+        await handleLogCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle DONE command for log flow
+      if (token === "DONE") {
+        if (await handleLogDone(env, from)) {
+          return new Response("ok", { status: 200 });
+        }
+      }
 
       if (token === "SIGNUP" || token === "SIGN UP") {
         await resetVisitCount(env, from);
