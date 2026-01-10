@@ -208,79 +208,97 @@ async function downloadWhatsAppMedia(env, mediaId) {
   return { bytes, mimeType };
 }
 
-// Transcribe audio using Grok (xAI) API - FREE!
+// Transcribe audio using AssemblyAI (FREE 300+ hours!)
 async function transcribeAudio(env, audioBytes, mimeType) {
-  // Try Grok first (xAI API), fall back to OpenAI if needed
-  const grokApiKey = env.XAI_API_KEY || env.GROK_API_KEY;
+  const assemblyApiKey = env.ASSEMBLYAI_API_KEY;
   const openaiApiKey = env.OPENAI_API_KEY;
 
-  if (!grokApiKey && !openaiApiKey) {
-    console.error("[TRANSCRIBE] Missing XAI_API_KEY or OPENAI_API_KEY");
-    return { success: false, error: "Missing transcription API key" };
+  if (!assemblyApiKey && !openaiApiKey) {
+    console.error("[TRANSCRIBE] Missing ASSEMBLYAI_API_KEY or OPENAI_API_KEY");
+    return { success: false, error: "Missing transcription API key. Add ASSEMBLYAI_API_KEY or OPENAI_API_KEY to environment variables." };
   }
 
-  // Try Grok first (free transcription)
-  if (grokApiKey) {
+  // Try AssemblyAI first (FREE!)
+  if (assemblyApiKey) {
     try {
-      console.log("[TRANSCRIBE] Using Grok (xAI) for transcription");
+      console.log("[TRANSCRIBE] Using AssemblyAI for transcription");
 
-      // Convert audio to base64 for Grok API
-      const base64Audio = btoa(
-        new Uint8Array(audioBytes).reduce((data, byte) => data + String.fromCharCode(byte), '')
-      );
-
-      const res = await fetch("https://api.x.ai/v1/chat/completions", {
+      // Step 1: Upload audio file to AssemblyAI
+      const uploadRes = await fetch("https://api.assemblyai.com/v2/upload", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${grokApiKey}`,
-          "Content-Type": "application/json",
+          authorization: assemblyApiKey,
+        },
+        body: audioBytes,
+      });
+
+      if (!uploadRes.ok) {
+        console.error("[TRANSCRIBE] AssemblyAI upload error", uploadRes.status, await uploadRes.text());
+        throw new Error(`Upload failed: ${uploadRes.status}`);
+      }
+
+      const uploadData = await uploadRes.json();
+      const audioUrl = uploadData.upload_url;
+
+      // Step 2: Request transcription
+      const transcriptRes = await fetch("https://api.assemblyai.com/v2/transcript", {
+        method: "POST",
+        headers: {
+          authorization: assemblyApiKey,
+          "content-type": "application/json",
         },
         body: JSON.stringify({
-          model: "grok-beta",
-          messages: [
-            {
-              role: "system",
-              content: "You are an audio transcription assistant. Transcribe the audio accurately. Return ONLY the transcribed text, nothing else."
-            },
-            {
-              role: "user",
-              content: [
-                {
-                  type: "text",
-                  text: "Please transcribe this audio file accurately. Return only the transcribed text."
-                },
-                {
-                  type: "audio",
-                  audio: {
-                    data: base64Audio,
-                    format: mimeType.includes("ogg") ? "ogg" : mimeType.includes("mp3") ? "mp3" : "m4a"
-                  }
-                }
-              ]
-            }
-          ],
-          temperature: 0.1,
+          audio_url: audioUrl,
+          speech_model: "universal",
         }),
       });
 
-      if (res.ok) {
-        const json = await res.json();
-        const transcript = json.choices?.[0]?.message?.content || "";
-
-        if (transcript) {
-          console.log("[TRANSCRIBE] Grok transcription successful");
-          return {
-            success: true,
-            transcript: transcript.trim(),
-            model: "grok-beta",
-            transcribed_at: new Date().toISOString(),
-          };
-        }
+      if (!transcriptRes.ok) {
+        console.error("[TRANSCRIBE] AssemblyAI transcript request error", transcriptRes.status, await transcriptRes.text());
+        throw new Error(`Transcription request failed: ${transcriptRes.status}`);
       }
 
-      console.log("[TRANSCRIBE] Grok failed, trying OpenAI...", res.status);
-    } catch (grokErr) {
-      console.error("[TRANSCRIBE] Grok exception, trying OpenAI:", grokErr.message);
+      const transcriptData = await transcriptRes.json();
+      const transcriptId = transcriptData.id;
+
+      // Step 3: Poll for completion
+      let transcript = null;
+      for (let i = 0; i < 60; i++) {
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+
+        const pollRes = await fetch(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+          headers: {
+            authorization: assemblyApiKey,
+          },
+        });
+
+        if (!pollRes.ok) {
+          console.error("[TRANSCRIBE] AssemblyAI poll error", pollRes.status);
+          throw new Error(`Polling failed: ${pollRes.status}`);
+        }
+
+        const pollData = await pollRes.json();
+
+        if (pollData.status === "completed") {
+          transcript = pollData.text;
+          console.log("[TRANSCRIBE] AssemblyAI transcription successful");
+          return {
+            success: true,
+            transcript: transcript || "",
+            model: "assemblyai-universal",
+            transcribed_at: new Date().toISOString(),
+          };
+        } else if (pollData.status === "error") {
+          console.error("[TRANSCRIBE] AssemblyAI transcription error:", pollData.error);
+          throw new Error(`Transcription error: ${pollData.error}`);
+        }
+
+        // Still processing, continue polling
+      }
+
+      throw new Error("Transcription timeout after 2 minutes");
+    } catch (assemblyErr) {
+      console.error("[TRANSCRIBE] AssemblyAI exception, trying OpenAI fallback:", assemblyErr.message);
     }
   }
 
