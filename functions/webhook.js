@@ -1580,9 +1580,9 @@ async function startQmunityFlow(env, customerId, waName) {
 
 📍 Home Affairs Q-mmunity
 
-*What number are you in the queue right now?*
+*How long is the queue right now?*
 
-Reply with a number from 1 to ${maxCap}`
+Reply with the last number you see (1 to ${maxCap})`
   );
 
   await setState(env, customerId, "qmunity_awaiting_queue_number", 1);
@@ -1636,10 +1636,10 @@ async function handleQmunityQueueNumber(env, customerId, rawText) {
     customerId,
     `✅ Got it!
 
-You're *#${queueNumber}* in the queue
+Queue is at *#${queueNumber}*
 📊 ${capacityPct}% capacity
 
-*How fast is the queue moving today?*`,
+*How fast is the queue moving?*`,
     [
       { id: "qmunity_speed_quickly", title: "🚀 Quickly" },
       { id: "qmunity_speed_moderately", title: "👍 Moderately" },
