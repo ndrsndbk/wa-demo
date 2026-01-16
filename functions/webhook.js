@@ -2034,21 +2034,9 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
-      // Handle QUEUE command (Qmunity flow)
+      // Handle QUEUE command (Qmunity flow) - always starts fresh
       if (token === "QUEUE") {
-        // Check if user is in another flow
-        const currentState = await getState(env, from);
-        if (
-          currentState.active_flow &&
-          !currentState.active_flow.startsWith("qmunity_")
-        ) {
-          await sendText(
-            env,
-            from,
-            "You're in the middle of another flow. Reply *DONE* to finish it first, then send *QUEUE* again."
-          );
-          return new Response("ok", { status: 200 });
-        }
+        await clearState(env, from); // Clear any existing flow
         await startQmunityFlow(env, from, waName);
         return new Response("ok", { status: 200 });
       }
