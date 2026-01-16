@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#FFC107" />
+  <title>Qmunity Queue - Home Affairs</title>
+  <style>
+    :root {
+      --primary: #FFC107;
+      --primary-dark: #FFA000;
+      --bg: #FFFDE7;
+      --card-bg: #FFFFFF;
+      --text: #212121;
+      --text-muted: #757575;
+      --border: #E0E0E0;
+      --success: #4CAF50;
+      --warning: #FF9800;
+      --danger: #F44336;
+      --shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding-bottom: 2rem;
+    }
+
+    .header {
+      background: var(--primary);
+      padding: 1rem;
+      text-align: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: var(--shadow);
+    }
+
+    .header h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+    }
+
+    .header .subtitle {
+      font-size: 0.8rem;
+      color: rgba(0,0,0,0.6);
+    }
+
+    .container {
+      max-width: 480px;
+      margin: 0 auto;
+      padding: 1rem;
+    }
+
+    .card {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+      box-shadow: var(--shadow);
+    }
+
+    .card-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    /* Capacity Section */
+    .capacity-section {
+      text-align: center;
+      padding: 1.5rem 1rem;
+    }
+
+    .capacity-pct {
+      font-size: 3.5rem;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1;
+    }
+
+    .capacity-pct .unit {
+      font-size: 1.5rem;
+      font-weight: 400;
+    }
+
+    .capacity-label {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    .progress-bar {
+      height: 8px;
+      background: var(--border);
+      border-radius: 4px;
+      margin-top: 1rem;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 0.5s ease, background-color 0.3s ease;
+    }
+
+    .progress-fill.low { background: var(--success); }
+    .progress-fill.medium { background: var(--warning); }
+    .progress-fill.high { background: var(--danger); }
+
+    /* Stats Row */
+    .stats-row {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .stat-box {
+      flex: 1;
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+      box-shadow: var(--shadow);
+    }
+
+    .stat-value {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .stat-label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin-top: 0.25rem;
+    }
+
+    /* Speed Section */
+    .speed-chips {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .speed-chip {
+      flex: 1;
+      min-width: 80px;
+      padding: 0.75rem 0.5rem;
+      border-radius: 8px;
+      text-align: center;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .speed-chip.quickly {
+      background: #E8F5E9;
+      color: #2E7D32;
+    }
+
+    .speed-chip.moderately {
+      background: #FFF3E0;
+      color: #E65100;
+    }
+
+    .speed-chip.slow {
+      background: #FFEBEE;
+      color: #C62828;
+    }
+
+    .speed-count {
+      font-size: 1.25rem;
+      font-weight: 700;
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+
+    /* Issues List */
+    .issues-list {
+      list-style: none;
+    }
+
+    .issue-item {
+      padding: 0.75rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .issue-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+
+    .issue-message {
+      font-size: 0.9rem;
+      color: var(--text);
+      margin-bottom: 0.25rem;
+      word-break: break-word;
+    }
+
+    .issue-time {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .no-issues {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      padding: 1rem 0;
+    }
+
+    /* Status Bar */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.5rem;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .status-dot.offline {
+      background: var(--danger);
+    }
+
+    /* Loading & Error States */
+    .loading-state,
+    .error-state {
+      text-align: center;
+      padding: 3rem 1rem;
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--primary);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1rem;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .error-state {
+      color: var(--danger);
+    }
+
+    .retry-btn {
+      margin-top: 1rem;
+      padding: 0.75rem 1.5rem;
+      background: var(--primary);
+      color: var(--text);
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .retry-btn:active {
+      background: var(--primary-dark);
+    }
+
+    /* CTA */
+    .cta-section {
+      text-align: center;
+      padding: 1rem;
+    }
+
+    .cta-text {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .cta-code {
+      display: inline-block;
+      background: var(--primary);
+      color: var(--text);
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      font-weight: 700;
+      font-size: 1rem;
+    }
+
+    /* Hide content when loading */
+    .content-wrapper.hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <h1 id="locationName">Qmunity Queue</h1>
+    <div class="subtitle">Real-time community reports</div>
+  </header>
+
+  <main class="container">
+    <!-- Loading State -->
+    <div id="loadingState" class="loading-state">
+      <div class="spinner"></div>
+      <p>Loading queue data...</p>
+    </div>
+
+    <!-- Error State -->
+    <div id="errorState" class="error-state" style="display: none;">
+      <p>Unable to load queue data</p>
+      <button class="retry-btn" onclick="fetchData()">Try Again</button>
+    </div>
+
+    <!-- Content -->
+    <div id="contentWrapper" class="content-wrapper hidden">
+      <!-- Capacity Card -->
+      <div class="card capacity-section">
+        <div class="capacity-pct">
+          <span id="capacityPct">--</span><span class="unit">%</span>
+        </div>
+        <div class="capacity-label">Queue Capacity</div>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill low" style="width: 0%"></div>
+        </div>
+        <p style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-muted);">
+          Latest reported: <strong id="latestQueueNumber">--</strong> / <span id="maxCapacity">25</span>
+        </p>
+      </div>
+
+      <!-- Stats Row -->
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-value" id="checkinsToday">0</div>
+          <div class="stat-label">Reports Today</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-value" id="uniqueCheckins">0</div>
+          <div class="stat-label">Contributors</div>
+        </div>
+      </div>
+
+      <!-- Speed Card -->
+      <div class="card" style="margin-top: 1rem;">
+        <div class="card-title">Queue Speed Today</div>
+        <div class="speed-chips">
+          <div class="speed-chip quickly">
+            <span class="speed-count" id="speedQuickly">0</span>
+            Quickly
+          </div>
+          <div class="speed-chip moderately">
+            <span class="speed-count" id="speedModerately">0</span>
+            Moderately
+          </div>
+          <div class="speed-chip slow">
+            <span class="speed-count" id="speedSlow">0</span>
+            Slow
+          </div>
+        </div>
+      </div>
+
+      <!-- Issues Card -->
+      <div class="card">
+        <div class="card-title">Community Reports</div>
+        <ul class="issues-list" id="issuesList">
+          <li class="no-issues">No reports yet today</li>
+        </ul>
+      </div>
+
+      <!-- CTA -->
+      <div class="cta-section">
+        <p class="cta-text">Help the community! Send <strong>QUEUE</strong> via WhatsApp</p>
+      </div>
+
+      <!-- Status -->
+      <div class="status-bar">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Updated just now</span>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // Configuration
+    const API_ENDPOINT = '/qmunity?location=home-affairs';
+    const REFRESH_INTERVAL = 30000; // 30 seconds
+
+    // DOM Elements
+    const loadingState = document.getElementById('loadingState');
+    const errorState = document.getElementById('errorState');
+    const contentWrapper = document.getElementById('contentWrapper');
+    const locationName = document.getElementById('locationName');
+    const capacityPct = document.getElementById('capacityPct');
+    const progressFill = document.getElementById('progressFill');
+    const latestQueueNumber = document.getElementById('latestQueueNumber');
+    const maxCapacity = document.getElementById('maxCapacity');
+    const checkinsToday = document.getElementById('checkinsToday');
+    const uniqueCheckins = document.getElementById('uniqueCheckins');
+    const speedQuickly = document.getElementById('speedQuickly');
+    const speedModerately = document.getElementById('speedModerately');
+    const speedSlow = document.getElementById('speedSlow');
+    const issuesList = document.getElementById('issuesList');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    let lastFetchTime = null;
+    let isOnline = true;
+
+    // Fetch data from API
+    async function fetchData() {
+      try {
+        showLoading();
+
+        const res = await fetch(API_ENDPOINT);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        updateUI(data);
+        isOnline = true;
+        lastFetchTime = new Date();
+        showContent();
+      } catch (err) {
+        console.error('Fetch error:', err);
+        isOnline = false;
+
+        // If we have previous data, keep showing it
+        if (lastFetchTime) {
+          updateStatus();
+          showContent();
+        } else {
+          showError();
+        }
+      }
+    }
+
+    // Update UI with data
+    function updateUI(data) {
+      // Location name
+      locationName.textContent = data.location?.name || 'Qmunity Queue';
+
+      // Capacity
+      const pct = data.latest_capacity_pct ?? 0;
+      capacityPct.textContent = pct;
+      progressFill.style.width = `${Math.min(100, pct)}%`;
+
+      // Progress bar color
+      progressFill.classList.remove('low', 'medium', 'high');
+      if (pct <= 40) {
+        progressFill.classList.add('low');
+      } else if (pct <= 70) {
+        progressFill.classList.add('medium');
+      } else {
+        progressFill.classList.add('high');
+      }
+
+      // Queue number
+      latestQueueNumber.textContent = data.latest_queue_number ?? '--';
+      maxCapacity.textContent = data.location?.max_capacity ?? 25;
+
+      // Stats
+      checkinsToday.textContent = data.checkins_today ?? 0;
+      uniqueCheckins.textContent = data.unique_checkins_today ?? 0;
+
+      // Speed
+      speedQuickly.textContent = data.speed_today?.QUICKLY ?? 0;
+      speedModerately.textContent = data.speed_today?.MODERATELY ?? 0;
+      speedSlow.textContent = data.speed_today?.SLOW ?? 0;
+
+      // Issues
+      const issues = data.recent_issues || [];
+      if (issues.length === 0) {
+        issuesList.innerHTML = '<li class="no-issues">No reports yet today</li>';
+      } else {
+        issuesList.innerHTML = issues.map(issue => `
+          <li class="issue-item">
+            <div class="issue-message">${escapeHtml(issue.message)}</div>
+            <div class="issue-time">${issue.time_ago || 'Recently'}</div>
+          </li>
+        `).join('');
+      }
+
+      updateStatus();
+    }
+
+    // Update status bar
+    function updateStatus() {
+      statusDot.classList.toggle('offline', !isOnline);
+
+      if (!isOnline) {
+        statusText.textContent = 'Offline - showing last data';
+        return;
+      }
+
+      if (lastFetchTime) {
+        const diffSec = Math.floor((new Date() - lastFetchTime) / 1000);
+        if (diffSec < 10) {
+          statusText.textContent = 'Updated just now';
+        } else if (diffSec < 60) {
+          statusText.textContent = `Updated ${diffSec}s ago`;
+        } else {
+          const diffMin = Math.floor(diffSec / 60);
+          statusText.textContent = `Updated ${diffMin}m ago`;
+        }
+      }
+    }
+
+    // State management
+    function showLoading() {
+      if (!lastFetchTime) {
+        loadingState.style.display = 'block';
+        errorState.style.display = 'none';
+        contentWrapper.classList.add('hidden');
+      }
+    }
+
+    function showContent() {
+      loadingState.style.display = 'none';
+      errorState.style.display = 'none';
+      contentWrapper.classList.remove('hidden');
+    }
+
+    function showError() {
+      loadingState.style.display = 'none';
+      errorState.style.display = 'block';
+      contentWrapper.classList.add('hidden');
+    }
+
+    // Escape HTML to prevent XSS
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Initialize
+    fetchData();
+
+    // Auto-refresh
+    setInterval(() => {
+      fetchData();
+    }, REFRESH_INTERVAL);
+
+    // Update status text every 10 seconds
+    setInterval(() => {
+      updateStatus();
+    }, 10000);
+  </script>
+</body>
+</html>

@@ -1507,6 +1507,250 @@ Please select the name of your team leader:`,
   return true;
 }
 
+// ---------- QMUNITY QUEUE Flow ----------
+
+// Get default Qmunity location (home-affairs)
+async function getDefaultQmunityLocation(env) {
+  return await sbSelectOne(
+    env,
+    "qmunity_locations",
+    `slug=eq.home-affairs&is_active=eq.true`,
+    "id,slug,name,max_capacity"
+  );
+}
+
+// Insert a queue check-in
+async function insertQmunityCheckin(env, locationId, waFrom, queueNumber) {
+  await sbInsert(env, "qmunity_checkins", [
+    {
+      location_id: locationId,
+      wa_from: waFrom,
+      queue_number: queueNumber,
+    },
+  ]);
+}
+
+// Insert a speed report
+async function insertQmunitySpeedReport(env, locationId, waFrom, speed) {
+  await sbInsert(env, "qmunity_speed_reports", [
+    {
+      location_id: locationId,
+      wa_from: waFrom,
+      speed: speed,
+    },
+  ]);
+}
+
+// Insert an issue report
+async function insertQmunityIssue(env, locationId, waFrom, message) {
+  await sbInsert(env, "qmunity_issues", [
+    {
+      location_id: locationId,
+      wa_from: waFrom,
+      message: message,
+    },
+  ]);
+}
+
+// Get the dashboard URL for Qmunity
+function getQmunityDashboardUrl(env) {
+  // Use configured URL or derive from site URL
+  if (env.QMUNITY_DASHBOARD_URL) return env.QMUNITY_DASHBOARD_URL;
+  if (env.SITE_URL) return `${env.SITE_URL}/qmunity`;
+  return "/qmunity";
+}
+
+// Start the Qmunity Queue flow
+async function startQmunityFlow(env, customerId, waName) {
+  const location = await getDefaultQmunityLocation(env);
+
+  if (!location) {
+    await sendText(
+      env,
+      customerId,
+      "Sorry, the queue reporting system is not available right now. Please try again later."
+    );
+    return;
+  }
+
+  const maxCap = location.max_capacity || 25;
+
+  await sendText(
+    env,
+    customerId,
+    `Thanks for helping the community!
+
+*What number are you in the queue right now?*
+
+Reply with a number from 1 to ${maxCap}.`
+  );
+
+  await setState(env, customerId, "qmunity_awaiting_queue_number", 1);
+}
+
+// Handle queue number input
+async function handleQmunityQueueNumber(env, customerId, rawText) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "qmunity_awaiting_queue_number") return false;
+
+  const location = await getDefaultQmunityLocation(env);
+  if (!location) {
+    await sendText(env, customerId, "System error. Please try again later.");
+    await clearState(env, customerId);
+    return true;
+  }
+
+  const maxCap = location.max_capacity || 25;
+
+  // Parse the queue number from text (e.g., "11", "I'm number 11", "number 11")
+  const numMatch = rawText.match(/(\d+)/);
+  if (!numMatch) {
+    await sendText(
+      env,
+      customerId,
+      `Please send a number from 1 to ${maxCap}.`
+    );
+    return true;
+  }
+
+  const queueNumber = parseInt(numMatch[1], 10);
+
+  if (queueNumber < 1 || queueNumber > maxCap) {
+    await sendText(
+      env,
+      customerId,
+      `Please send a number from 1 to ${maxCap}.`
+    );
+    return true;
+  }
+
+  // Save the check-in
+  await insertQmunityCheckin(env, location.id, customerId, queueNumber);
+
+  // Calculate capacity percentage
+  const capacityPct = Math.round((queueNumber / maxCap) * 100);
+
+  // Send acknowledgement and ask for speed
+  await sendInteractiveButtons(
+    env,
+    customerId,
+    `Got it! You're *#${queueNumber}* in the queue (${capacityPct}% capacity).
+
+*How is the queue moving today?*`,
+    [
+      { id: "qmunity_speed_quickly", title: "QUICKLY" },
+      { id: "qmunity_speed_moderately", title: "MODERATELY" },
+      { id: "qmunity_speed_slow", title: "SLOW" },
+    ]
+  );
+
+  await setState(env, customerId, "qmunity_awaiting_speed", 2);
+  return true;
+}
+
+// Handle speed button selection
+async function handleQmunitySpeedReply(env, customerId, replyId) {
+  const location = await getDefaultQmunityLocation(env);
+
+  // Map reply ID to speed value
+  const speedMap = {
+    qmunity_speed_quickly: "QUICKLY",
+    qmunity_speed_moderately: "MODERATELY",
+    qmunity_speed_slow: "SLOW",
+  };
+
+  const speed = speedMap[replyId];
+  if (!speed) return false;
+
+  if (location) {
+    await insertQmunitySpeedReport(env, location.id, customerId, speed);
+  }
+
+  const dashUrl = getQmunityDashboardUrl(env);
+
+  await sendText(
+    env,
+    customerId,
+    `Thanks for the update!
+
+See how the queue is doing:
+${dashUrl}
+
+*Anything we should know?* Reply with ISSUE <your message> or DONE to finish.`
+  );
+
+  await setState(env, customerId, "qmunity_awaiting_issue", 3);
+  return true;
+}
+
+// Handle ISSUE command (can be sent anytime during or after queue flow)
+async function handleQmunityIssue(env, customerId, rawText) {
+  const location = await getDefaultQmunityLocation(env);
+
+  // Extract the issue message after "ISSUE"
+  const issueMatch = rawText.match(/^ISSUE\s+(.+)$/i);
+  if (!issueMatch) {
+    await sendText(
+      env,
+      customerId,
+      "To report an issue, send: ISSUE <your message>"
+    );
+    return true;
+  }
+
+  const issueMessage = issueMatch[1].trim();
+
+  if (issueMessage.length < 3) {
+    await sendText(
+      env,
+      customerId,
+      "Please provide more details about the issue."
+    );
+    return true;
+  }
+
+  if (location) {
+    await insertQmunityIssue(env, location.id, customerId, issueMessage);
+  }
+
+  const dashUrl = getQmunityDashboardUrl(env);
+
+  await sendText(
+    env,
+    customerId,
+    `Thanks for reporting! Your feedback helps the community.
+
+View the queue status: ${dashUrl}`
+  );
+
+  // Clear state if in qmunity flow
+  const st = await getState(env, customerId);
+  if (st.active_flow?.startsWith("qmunity_")) {
+    await clearState(env, customerId);
+  }
+
+  return true;
+}
+
+// Handle DONE in qmunity flow
+async function handleQmunityDone(env, customerId) {
+  const st = await getState(env, customerId);
+  if (!st.active_flow?.startsWith("qmunity_")) return false;
+
+  const dashUrl = getQmunityDashboardUrl(env);
+
+  await sendText(
+    env,
+    customerId,
+    `All done! Thanks for contributing to the community.
+
+Check the queue anytime: ${dashUrl}`
+  );
+
+  await clearState(env, customerId);
+  return true;
+}
+
 // ---------- STAMP handling ----------
 
 async function handleStamp(env, customerId, token) {
@@ -1767,6 +2011,16 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Qmunity speed buttons
+      if (
+        replyId === "qmunity_speed_quickly" ||
+        replyId === "qmunity_speed_moderately" ||
+        replyId === "qmunity_speed_slow"
+      ) {
+        await handleQmunitySpeedReply(env, from, replyId);
+        return new Response("ok", { status: 200 });
+      }
+
       return new Response("ok", { status: 200 });
     }
 
@@ -1780,8 +2034,46 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Handle QUEUE command (Qmunity flow)
+      if (token === "QUEUE") {
+        // Check if user is in another flow
+        const currentState = await getState(env, from);
+        if (
+          currentState.active_flow &&
+          !currentState.active_flow.startsWith("qmunity_")
+        ) {
+          await sendText(
+            env,
+            from,
+            "You're in the middle of another flow. Reply *DONE* to finish it first, then send *QUEUE* again."
+          );
+          return new Response("ok", { status: 200 });
+        }
+        await startQmunityFlow(env, from, waName);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle queue number input for Qmunity flow
+      const qmunityState = await getState(env, from);
+      if (qmunityState.active_flow === "qmunity_awaiting_queue_number") {
+        if (await handleQmunityQueueNumber(env, from, raw)) {
+          return new Response("ok", { status: 200 });
+        }
+      }
+
+      // Handle ISSUE command (Qmunity - can be sent anytime)
+      if (token.startsWith("ISSUE")) {
+        await handleQmunityIssue(env, from, raw);
+        return new Response("ok", { status: 200 });
+      }
+
       // Handle DONE command for log flow
       if (token === "DONE") {
+        // First check Qmunity flow
+        if (await handleQmunityDone(env, from)) {
+          return new Response("ok", { status: 200 });
+        }
+        // Then check log flow
         if (await handleLogDone(env, from)) {
           return new Response("ok", { status: 200 });
         }
