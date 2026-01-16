@@ -297,14 +297,23 @@
       margin-bottom: 0.5rem;
     }
 
-    .cta-code {
+    .cta-button {
       display: inline-block;
-      background: var(--primary);
-      color: var(--text);
-      padding: 0.5rem 1rem;
-      border-radius: 8px;
-      font-weight: 700;
-      font-size: 1rem;
+      background: #25D366;
+      color: white;
+      padding: 0.75rem 1.5rem;
+      border-radius: 24px;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      margin-top: 0.5rem;
+      box-shadow: 0 2px 8px rgba(37, 211, 102, 0.3);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .cta-button:active {
+      transform: scale(0.98);
+      box-shadow: 0 1px 4px rgba(37, 211, 102, 0.3);
     }
 
     /* Hide content when loading */
@@ -315,7 +324,7 @@
 </head>
 <body>
   <header class="header">
-    <h1 id="locationName">Qmunity Queue</h1>
+    <h1 id="locationName">Home Affairs Q-mmunity</h1>
     <div class="subtitle">Real-time community reports</div>
   </header>
 
@@ -389,7 +398,10 @@
 
       <!-- CTA -->
       <div class="cta-section">
-        <p class="cta-text">Help the community! Send <strong>QUEUE</strong> via WhatsApp</p>
+        <p class="cta-text">Help the community!</p>
+        <a href="https://wa.me/84764929881?text=QUEUE" class="cta-button">
+          Send QUEUE via WhatsApp
+        </a>
       </div>
 
       <!-- Status -->
@@ -457,8 +469,8 @@
 
     // Update UI with data
     function updateUI(data) {
-      // Location name
-      locationName.textContent = data.location?.name || 'Qmunity Queue';
+      // Location name - always show Q-mmunity branding
+      locationName.textContent = 'Home Affairs Q-mmunity';
 
       // Capacity
       const pct = data.latest_capacity_pct ?? 0;

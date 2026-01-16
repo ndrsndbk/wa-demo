@@ -1554,10 +1554,8 @@ async function insertQmunityIssue(env, locationId, waFrom, message) {
 
 // Get the dashboard URL for Qmunity
 function getQmunityDashboardUrl(env) {
-  // Use configured URL or derive from site URL
   if (env.QMUNITY_DASHBOARD_URL) return env.QMUNITY_DASHBOARD_URL;
-  if (env.SITE_URL) return `${env.SITE_URL}/qmunity`;
-  return "/qmunity";
+  return "https://wa-demo.pages.dev/qmunity";
 }
 
 // Start the Qmunity Queue flow
@@ -1578,11 +1576,13 @@ async function startQmunityFlow(env, customerId, waName) {
   await sendText(
     env,
     customerId,
-    `Thanks for helping the community!
+    `🙏 *Thanks for helping the community!*
+
+📍 Home Affairs Q-mmunity
 
 *What number are you in the queue right now?*
 
-Reply with a number from 1 to ${maxCap}.`
+Reply with a number from 1 to ${maxCap}`
   );
 
   await setState(env, customerId, "qmunity_awaiting_queue_number", 1);
@@ -1634,13 +1634,16 @@ async function handleQmunityQueueNumber(env, customerId, rawText) {
   await sendInteractiveButtons(
     env,
     customerId,
-    `Got it! You're *#${queueNumber}* in the queue (${capacityPct}% capacity).
+    `✅ Got it!
 
-*How is the queue moving today?*`,
+You're *#${queueNumber}* in the queue
+📊 ${capacityPct}% capacity
+
+*How fast is the queue moving today?*`,
     [
-      { id: "qmunity_speed_quickly", title: "QUICKLY" },
-      { id: "qmunity_speed_moderately", title: "MODERATELY" },
-      { id: "qmunity_speed_slow", title: "SLOW" },
+      { id: "qmunity_speed_quickly", title: "🚀 Quickly" },
+      { id: "qmunity_speed_moderately", title: "👍 Moderately" },
+      { id: "qmunity_speed_slow", title: "🐢 Slow" },
     ]
   );
 
@@ -1668,37 +1671,43 @@ async function handleQmunitySpeedReply(env, customerId, replyId) {
 
   const dashUrl = getQmunityDashboardUrl(env);
 
-  await sendText(
+  await sendInteractiveButtons(
     env,
     customerId,
-    `Thanks for the update!
+    `🎉 *Thanks for the update!*
 
-See how the queue is doing:
+📊 See the live queue status:
 ${dashUrl}
 
-*Anything we should know?* Reply with ISSUE <your message> or DONE to finish.`
+*Anything else to report?*`,
+    [
+      { id: "qmunity_report_issue", title: "⚠️ Report Issue" },
+      { id: "qmunity_done", title: "✅ All Done" },
+    ]
   );
 
   await setState(env, customerId, "qmunity_awaiting_issue", 3);
   return true;
 }
 
-// Handle ISSUE command (can be sent anytime during or after queue flow)
-async function handleQmunityIssue(env, customerId, rawText) {
+// Handle ISSUE - prompt user for their issue
+async function promptQmunityIssue(env, customerId) {
+  await sendText(
+    env,
+    customerId,
+    `⚠️ *Report an Issue*
+
+What would you like to report?
+
+Just type your message and send it.`
+  );
+  await setState(env, customerId, "qmunity_typing_issue", 4);
+  return true;
+}
+
+// Handle the actual issue text submission
+async function handleQmunityIssueText(env, customerId, issueMessage) {
   const location = await getDefaultQmunityLocation(env);
-
-  // Extract the issue message after "ISSUE"
-  const issueMatch = rawText.match(/^ISSUE\s+(.+)$/i);
-  if (!issueMatch) {
-    await sendText(
-      env,
-      customerId,
-      "To report an issue, send: ISSUE <your message>"
-    );
-    return true;
-  }
-
-  const issueMessage = issueMatch[1].trim();
 
   if (issueMessage.length < 3) {
     await sendText(
@@ -1718,17 +1727,15 @@ async function handleQmunityIssue(env, customerId, rawText) {
   await sendText(
     env,
     customerId,
-    `Thanks for reporting! Your feedback helps the community.
+    `🙏 *Thanks for reporting!*
 
-View the queue status: ${dashUrl}`
+Your feedback helps the community.
+
+📊 View the queue status:
+${dashUrl}`
   );
 
-  // Clear state if in qmunity flow
-  const st = await getState(env, customerId);
-  if (st.active_flow?.startsWith("qmunity_")) {
-    await clearState(env, customerId);
-  }
-
+  await clearState(env, customerId);
   return true;
 }
 
@@ -1742,9 +1749,12 @@ async function handleQmunityDone(env, customerId) {
   await sendText(
     env,
     customerId,
-    `All done! Thanks for contributing to the community.
+    `✅ *All done!*
 
-Check the queue anytime: ${dashUrl}`
+Thanks for helping the community! 🙏
+
+📊 Check the queue anytime:
+${dashUrl}`
   );
 
   await clearState(env, customerId);
@@ -2021,6 +2031,17 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Qmunity issue/done buttons
+      if (replyId === "qmunity_report_issue") {
+        await promptQmunityIssue(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      if (replyId === "qmunity_done") {
+        await handleQmunityDone(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
       return new Response("ok", { status: 200 });
     }
 
@@ -2049,9 +2070,9 @@ export async function onRequestPost({ request, env }) {
         }
       }
 
-      // Handle ISSUE command (Qmunity - can be sent anytime)
-      if (token.startsWith("ISSUE")) {
-        await handleQmunityIssue(env, from, raw);
+      // Handle issue text input for Qmunity flow
+      if (qmunityState.active_flow === "qmunity_typing_issue") {
+        await handleQmunityIssueText(env, from, raw);
         return new Response("ok", { status: 200 });
       }
 
