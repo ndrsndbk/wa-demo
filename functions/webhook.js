@@ -1939,6 +1939,14 @@ export async function onRequestPost({ request, env }) {
       return new Response("ignored", { status: 200 });
     }
 
+    // Only process messages for this phone number (ignore messages for other numbers on same Meta app)
+    const recipientPhoneNumberId = value.metadata?.phone_number_id;
+    const ourPhoneNumberId = getPhoneNumberId(env);
+    if (recipientPhoneNumberId && recipientPhoneNumberId !== ourPhoneNumberId) {
+      console.log('[WA-DEMO] Ignoring message for different phone number:', recipientPhoneNumberId);
+      return new Response("ok", { status: 200 });
+    }
+
     const msgId = message.id;
     const from = message.from;
     const contacts = value.contacts || [];
