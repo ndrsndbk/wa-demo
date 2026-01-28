@@ -1761,6 +1761,792 @@ ${dashUrl}`
   return true;
 }
 
+// ---------- BUDGET TRACKER: Dual-Mode WhatsApp Budget Tracker ----------
+// Isolated module: does NOT touch any existing flows.
+// Trigger: "budget" / "budget status"
+// States: budget_select_mode, budget_full_1..4, budget_limit_1..2,
+//         budget_log_amount, budget_log_category, budget_log_note, budget_log_another
+
+// --- Budget: HCM timezone helpers ---
+
+function getBudgetHCMDate() {
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const hcm = new Date(utc + (3600000 * 7));
+  return hcm;
+}
+
+function getBudgetDateISO() {
+  const hcm = getBudgetHCMDate();
+  const y = hcm.getFullYear();
+  const m = String(hcm.getMonth() + 1).padStart(2, "0");
+  const d = String(hcm.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function getBudgetMonthLabel() {
+  const hcm = getBudgetHCMDate();
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${months[hcm.getMonth()]} ${hcm.getFullYear()}`;
+}
+
+function getBudgetMonthInfo() {
+  const hcm = getBudgetHCMDate();
+  const year = hcm.getFullYear();
+  const month = hcm.getMonth(); // 0-indexed
+  const day = hcm.getDate();
+  const totalDays = new Date(year, month + 1, 0).getDate();
+  const daysElapsed = day;
+  const daysRemaining = totalDays - day;
+  const firstDay = `${year}-${String(month + 1).padStart(2, "0")}-01`;
+  return { year, month, day, totalDays, daysElapsed, daysRemaining, firstDay };
+}
+
+function formatVND(n) {
+  if (n == null) return "0 \u20ab";
+  const abs = Math.abs(Number(n));
+  const formatted = abs.toLocaleString("en-US").replace(/,/g, ",");
+  const sign = Number(n) < 0 ? "-" : "";
+  return `${sign}${formatted} \u20ab`;
+}
+
+function parseVND(text) {
+  if (!text) return null;
+  const cleaned = text.replace(/[^\d]/g, "");
+  const num = parseInt(cleaned, 10);
+  if (isNaN(num) || num <= 0) return null;
+  return num;
+}
+
+// --- Budget: DB helpers ---
+
+async function getBudgetProfile(env, waFrom) {
+  return await sbSelectOne(
+    env,
+    "budget_profiles",
+    `wa_from=eq.${encodeURIComponent(waFrom)}`,
+    "id,wa_from,mode,total_budget_vnd,fixed_costs_vnd,savings_goal_vnd,discretionary_budget_vnd,available_budget_vnd,created_at,updated_at"
+  );
+}
+
+async function upsertBudgetProfile(env, waFrom, fields) {
+  const now = new Date().toISOString();
+  const payload = {
+    wa_from: waFrom,
+    updated_at: now,
+    ...fields,
+  };
+  await sbUpsert(env, "budget_profiles", [payload], "wa_from");
+}
+
+async function saveBudgetCategories(env, waFrom, categories) {
+  // Delete existing categories for this user first
+  const { url } = getSupabaseConfig(env);
+  await fetch(
+    `${url}/rest/v1/budget_categories?wa_from=eq.${encodeURIComponent(waFrom)}`,
+    {
+      method: "DELETE",
+      headers: sbHeaders(env),
+    }
+  );
+  // Insert new ones
+  if (categories.length > 0) {
+    const rows = categories.map((c) => ({
+      wa_from: waFrom,
+      category_name: c.trim(),
+    }));
+    await sbInsert(env, "budget_categories", rows);
+  }
+}
+
+async function getBudgetCategories(env, waFrom) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/budget_categories?wa_from=eq.${encodeURIComponent(waFrom)}&select=category_name`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.map((r) => r.category_name);
+}
+
+async function saveBudgetExpense(env, waFrom, amountVnd, category, note) {
+  const expenseDate = getBudgetDateISO();
+  const row = {
+    wa_from: waFrom,
+    amount_vnd: amountVnd,
+    category: category,
+    note: note || null,
+    expense_date: expenseDate,
+  };
+  await sbInsert(env, "budget_expenses", [row]);
+}
+
+async function getMonthlyExpenses(env, waFrom) {
+  const { firstDay } = getBudgetMonthInfo();
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/budget_expenses?wa_from=eq.${encodeURIComponent(waFrom)}&expense_date=gte.${firstDay}&select=amount_vnd,category`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) return [];
+  return await res.json();
+}
+
+// --- Budget: Session data store (uses conversation_state step as JSON) ---
+// We store budget session data in a lightweight way:
+// active_flow = "budget_*" states
+// step = numeric step (used to store sub-state data via a separate approach)
+// For complex data (like partial onboarding answers), we use a simple JSON
+// stored in a budget-specific field. To keep isolation, we store transient
+// session data in-memory via the conversation_state step field and
+// budget_profiles for persistent data.
+
+// --- Budget: Flow handlers ---
+
+async function startBudgetFlow(env, customerId) {
+  // Check if profile exists
+  const profile = await getBudgetProfile(env, customerId);
+
+  if (profile) {
+    // Profile exists -> go to expense logging
+    await startBudgetExpenseLog(env, customerId);
+  } else {
+    // No profile -> show mode selector
+    await sendText(
+      env,
+      customerId,
+      `\ud83d\udcb8 *Budget Setup*
+
+Choose how you'd like to track your money:
+
+1\ufe0f\u20e3 *Full Monthly Budget*
+Track income, fixed costs, savings, and spending.
+
+2\ufe0f\u20e3 *Spending Limit Mode*
+For when you only have a set amount left this month
+and want to make sure you don't overspend.
+
+Reply 1 or 2 \ud83d\udc47`
+    );
+    await setState(env, customerId, "budget_select_mode", 0);
+  }
+}
+
+async function handleBudgetSelectMode(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_select_mode") return false;
+
+  const choice = raw.trim();
+
+  if (choice === "1") {
+    // Mode A: Full Monthly Budget
+    await sendText(
+      env,
+      customerId,
+      `\ud83d\udcca *Full Monthly Budget Setup*
+
+Step 1 of 4:
+What is your *total monthly income* (VND)?
+
+e.g. 40000000`
+    );
+    await setState(env, customerId, "budget_full_1", 0);
+    return true;
+  }
+
+  if (choice === "2") {
+    // Mode B: Spending Limit
+    await sendText(
+      env,
+      customerId,
+      `\ud83d\udcb0 *Spending Limit Setup*
+
+Step 1 of 2:
+What is your *available spending money* for this month (VND)?
+
+e.g. 5000000`
+    );
+    await setState(env, customerId, "budget_limit_1", 0);
+    return true;
+  }
+
+  await sendText(env, customerId, "Please reply *1* or *2* to choose a mode.");
+  return true;
+}
+
+// --- Mode A: Full Monthly Budget Onboarding (4 steps) ---
+
+async function handleBudgetFull1(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_full_1") return false;
+
+  const amount = parseVND(raw);
+  if (!amount) {
+    await sendText(env, customerId, "Please enter a valid amount in VND (numbers only).\ne.g. 40000000");
+    return true;
+  }
+
+  // Save total budget, move to step 2
+  await upsertBudgetProfile(env, customerId, {
+    mode: "full",
+    total_budget_vnd: amount,
+  });
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Total income: ${formatVND(amount)}
+
+Step 2 of 4:
+What are your *total fixed costs* per month (VND)?
+(rent, bills, subscriptions, etc.)
+
+e.g. 15000000`
+  );
+  await setState(env, customerId, "budget_full_2", 0);
+  return true;
+}
+
+async function handleBudgetFull2(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_full_2") return false;
+
+  const amount = parseVND(raw);
+  if (!amount) {
+    await sendText(env, customerId, "Please enter a valid amount in VND.\ne.g. 15000000");
+    return true;
+  }
+
+  await upsertBudgetProfile(env, customerId, {
+    mode: "full",
+    fixed_costs_vnd: amount,
+  });
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Fixed costs: ${formatVND(amount)}
+
+Step 3 of 4:
+How much do you want to *save* this month (VND)?
+
+e.g. 5000000`
+  );
+  await setState(env, customerId, "budget_full_3", 0);
+  return true;
+}
+
+async function handleBudgetFull3(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_full_3") return false;
+
+  const amount = parseVND(raw);
+  if (!amount) {
+    await sendText(env, customerId, "Please enter a valid amount in VND.\ne.g. 5000000");
+    return true;
+  }
+
+  // Calculate discretionary
+  const profile = await getBudgetProfile(env, customerId);
+  const total = profile?.total_budget_vnd || 0;
+  const fixed = profile?.fixed_costs_vnd || 0;
+  const discretionary = Math.max(0, total - fixed - amount);
+
+  await upsertBudgetProfile(env, customerId, {
+    mode: "full",
+    savings_goal_vnd: amount,
+    discretionary_budget_vnd: discretionary,
+  });
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Savings goal: ${formatVND(amount)}
+
+\ud83d\udcca *Your discretionary budget:*
+${formatVND(total)} - ${formatVND(fixed)} - ${formatVND(amount)} = *${formatVND(discretionary)}*
+
+Step 4 of 4:
+List your *spending categories* (comma-separated).
+
+e.g. Food, Transport, Fun, Kids, Health`
+  );
+  await setState(env, customerId, "budget_full_4", 0);
+  return true;
+}
+
+async function handleBudgetFull4(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_full_4") return false;
+
+  const categories = raw.split(",").map((c) => c.trim()).filter((c) => c.length > 0);
+  if (categories.length === 0) {
+    await sendText(env, customerId, "Please enter at least one category.\ne.g. Food, Transport, Fun");
+    return true;
+  }
+
+  await saveBudgetCategories(env, customerId, categories);
+
+  const profile = await getBudgetProfile(env, customerId);
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 *Budget Setup Complete!*
+
+\ud83d\udcca Mode: Full Monthly Budget
+\ud83d\udcb0 Income: ${formatVND(profile?.total_budget_vnd)}
+\ud83c\udfe0 Fixed costs: ${formatVND(profile?.fixed_costs_vnd)}
+\ud83d\udcb3 Savings: ${formatVND(profile?.savings_goal_vnd)}
+\ud83d\udcb8 Discretionary: ${formatVND(profile?.discretionary_budget_vnd)}
+\ud83d\udcc1 Categories: ${categories.join(", ")}
+
+Reply *budget* to log an expense.
+Reply *budget status* anytime for your dashboard.`
+  );
+  await clearState(env, customerId);
+  return true;
+}
+
+// --- Mode B: Spending Limit Onboarding (2 steps) ---
+
+async function handleBudgetLimit1(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_limit_1") return false;
+
+  const amount = parseVND(raw);
+  if (!amount) {
+    await sendText(env, customerId, "Please enter a valid amount in VND.\ne.g. 5000000");
+    return true;
+  }
+
+  await upsertBudgetProfile(env, customerId, {
+    mode: "limit",
+    available_budget_vnd: amount,
+  });
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Available budget: ${formatVND(amount)}
+
+Step 2 of 2:
+List your *spending categories* (comma-separated).
+
+e.g. Food, Transport, Fun, Kids, Health`
+  );
+  await setState(env, customerId, "budget_limit_2", 0);
+  return true;
+}
+
+async function handleBudgetLimit2(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_limit_2") return false;
+
+  const categories = raw.split(",").map((c) => c.trim()).filter((c) => c.length > 0);
+  if (categories.length === 0) {
+    await sendText(env, customerId, "Please enter at least one category.\ne.g. Food, Transport, Fun");
+    return true;
+  }
+
+  await saveBudgetCategories(env, customerId, categories);
+
+  const profile = await getBudgetProfile(env, customerId);
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 *Budget Setup Complete!*
+
+\ud83d\udcb0 Mode: Spending Limit
+\ud83d\udcb8 Available: ${formatVND(profile?.available_budget_vnd)}
+\ud83d\udcc1 Categories: ${categories.join(", ")}
+
+Reply *budget* to log an expense.
+Reply *budget status* anytime for your dashboard.`
+  );
+  await clearState(env, customerId);
+  return true;
+}
+
+// --- Expense Logging Flow ---
+
+async function startBudgetExpenseLog(env, customerId) {
+  await sendText(
+    env,
+    customerId,
+    `\ud83d\udcb8 *Log Expense*
+
+How much did you spend? (VND)
+
+e.g. 150000`
+  );
+  await setState(env, customerId, "budget_log_amount", 0);
+}
+
+async function handleBudgetLogAmount(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_log_amount") return false;
+
+  const amount = parseVND(raw);
+  if (!amount) {
+    await sendText(env, customerId, "Please enter a valid amount in VND.\ne.g. 150000");
+    return true;
+  }
+
+  // Store amount temporarily in step field (we'll use step as the amount)
+  // To pass amount between steps, we store it in the profile's updated_at hack
+  // Actually, let's use a simpler approach: store pending expense amount in conversation_state step
+  // step will hold the amount as a number
+  await setState(env, customerId, "budget_log_category", amount);
+
+  const categories = await getBudgetCategories(env, customerId);
+  const catList = categories.length > 0
+    ? categories.map((c, i) => `${i + 1}. ${c}`).join("\n")
+    : "No categories set up. Type your category name.";
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Amount: ${formatVND(amount)}
+
+Which category?
+
+${catList}
+
+Reply with the *number* or *name*.`
+  );
+  return true;
+}
+
+async function handleBudgetLogCategory(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_log_category") return false;
+
+  const amount = st.step; // Amount stored in step field
+  const categories = await getBudgetCategories(env, customerId);
+
+  let selectedCategory = raw.trim();
+
+  // Check if user typed a number
+  const num = parseInt(raw.trim(), 10);
+  if (!isNaN(num) && num >= 1 && num <= categories.length) {
+    selectedCategory = categories[num - 1];
+  } else {
+    // Check if it matches a category name (case-insensitive)
+    const match = categories.find(
+      (c) => c.toLowerCase() === raw.trim().toLowerCase()
+    );
+    if (match) {
+      selectedCategory = match;
+    }
+  }
+
+  // Store category and amount together: use step as a combined value
+  // We'll encode amount|category in the active_flow suffix
+  // Actually simpler: store amount in step, category will be passed to note step
+  // Let's use a JSON-encoded step approach by using the active_flow to carry data
+
+  // Use active_flow = "budget_log_note" and step = amount
+  // Store category in a temp approach: we'll set the flow to budget_log_note_{encodedCategory}
+  // But that's fragile. Better: store pending data in budget_profiles as a JSON field.
+  // Simplest: encode amount and category in flow name.
+
+  // Cleanest approach: use budget_log_note as flow, and store {amount, category} encoded in step.
+  // Since step is a number, we can't. Let's use the flow name to carry category.
+  // Flow: budget_log_note and step = amount. Category stored via setState with a special flow name.
+
+  // Most pragmatic: save expense immediately without note, then ask for note as optional update.
+  // OR: just chain through — save partial data to a pending field.
+
+  // Let's use the cleanest approach consistent with the codebase:
+  // Store pending expense data in budget_profiles.updated_at as a temp JSON? No, that's bad.
+  // Best: just save the expense now with no note, then prompt for an optional note,
+  // and UPDATE the last expense if user provides one.
+
+  // Save expense immediately
+  await saveBudgetExpense(env, customerId, amount, selectedCategory, null);
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Logged: ${formatVND(amount)} \u2192 *${selectedCategory}*
+
+Add an optional note? (or reply *skip*)
+
+e.g. Lunch with team`
+  );
+
+  // Store a reference: we use step=0 for budget_log_note to indicate "update last expense"
+  await setState(env, customerId, "budget_log_note", 0);
+  return true;
+}
+
+async function handleBudgetLogNote(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_log_note") return false;
+
+  const token = raw.trim().toUpperCase();
+
+  if (token !== "SKIP" && raw.trim().length > 0) {
+    // Update the most recent expense with the note
+    const { url } = getSupabaseConfig(env);
+    // Get last expense for this user
+    const lastExpense = await sbSelectOne(
+      env,
+      "budget_expenses",
+      `wa_from=eq.${encodeURIComponent(customerId)}&order=created_at.desc`,
+      "id"
+    );
+    if (lastExpense?.id) {
+      await sbUpdate(
+        env,
+        "budget_expenses",
+        `id=eq.${encodeURIComponent(lastExpense.id)}`,
+        { note: raw.trim() }
+      );
+    }
+  }
+
+  await sendText(
+    env,
+    customerId,
+    `\u2705 Expense saved!
+
+Log another? Reply *yes* or *no*.`
+  );
+  await setState(env, customerId, "budget_log_another", 0);
+  return true;
+}
+
+async function handleBudgetLogAnother(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (st.active_flow !== "budget_log_another") return false;
+
+  const token = raw.trim().toUpperCase();
+
+  if (token === "YES" || token === "Y") {
+    await startBudgetExpenseLog(env, customerId);
+    return true;
+  }
+
+  // Show quick summary then exit
+  const profile = await getBudgetProfile(env, customerId);
+  const expenses = await getMonthlyExpenses(env, customerId);
+  const totalSpent = expenses.reduce((sum, e) => sum + Number(e.amount_vnd), 0);
+
+  let tracked = 0;
+  if (profile?.mode === "full") {
+    tracked = profile.discretionary_budget_vnd || 0;
+  } else if (profile?.mode === "limit") {
+    tracked = profile.available_budget_vnd || 0;
+  }
+
+  const remaining = tracked - totalSpent;
+  const pct = tracked > 0 ? Math.round((totalSpent / tracked) * 100) : 0;
+
+  await sendText(
+    env,
+    customerId,
+    `\ud83d\udc4d Done!
+
+\ud83d\udcb0 Spent this month: ${formatVND(totalSpent)} (${pct}%)
+\ud83d\udcbc Remaining: ${formatVND(remaining)}
+
+Reply *budget* to log more.
+Reply *budget status* for full dashboard.`
+  );
+  await clearState(env, customerId);
+  return true;
+}
+
+// --- Budget Status Command ---
+
+async function handleBudgetStatus(env, customerId) {
+  const profile = await getBudgetProfile(env, customerId);
+
+  if (!profile) {
+    await sendText(
+      env,
+      customerId,
+      `You don't have a budget set up yet.
+
+Reply *budget* to get started.`
+    );
+    return;
+  }
+
+  const expenses = await getMonthlyExpenses(env, customerId);
+  const monthLabel = getBudgetMonthLabel();
+  const { totalDays, daysElapsed, daysRemaining } = getBudgetMonthInfo();
+
+  // Determine tracked budget
+  let trackedBudget = 0;
+  if (profile.mode === "full") {
+    trackedBudget = Number(profile.discretionary_budget_vnd) || 0;
+  } else {
+    trackedBudget = Number(profile.available_budget_vnd) || 0;
+  }
+
+  // Calculate totals
+  const totalSpent = expenses.reduce((sum, e) => sum + Number(e.amount_vnd), 0);
+  const remaining = trackedBudget - totalSpent;
+  const percentUsed = trackedBudget > 0 ? Math.round((totalSpent / trackedBudget) * 100) : 0;
+
+  // Pace analysis
+  const idealDaily = totalDays > 0 ? trackedBudget / totalDays : 0;
+  const actualDaily = daysElapsed > 0 ? totalSpent / daysElapsed : 0;
+  const dailyVariance = actualDaily - idealDaily;
+  const weeklyVariance = dailyVariance * 7;
+
+  // Pace emoji and message
+  let paceMsg = "";
+  if (dailyVariance > 0) {
+    paceMsg = `\u26a0\ufe0f Over target by:
++${formatVND(Math.round(dailyVariance))} / day
++${formatVND(Math.round(weeklyVariance))} / week`;
+  } else if (dailyVariance < 0) {
+    paceMsg = `\u2705 Under target by:
+${formatVND(Math.round(Math.abs(dailyVariance)))} / day
+${formatVND(Math.round(Math.abs(weeklyVariance)))} / week`;
+  } else {
+    paceMsg = `\u2705 Right on target!`;
+  }
+
+  // Top categories
+  const catTotals = {};
+  for (const e of expenses) {
+    catTotals[e.category] = (catTotals[e.category] || 0) + Number(e.amount_vnd);
+  }
+  const sorted = Object.entries(catTotals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  let catMsg = "";
+  if (sorted.length > 0) {
+    catMsg = sorted
+      .map(([cat, amt]) => {
+        const pct = totalSpent > 0 ? Math.round((amt / totalSpent) * 100) : 0;
+        return `- ${cat}: ${pct}%`;
+      })
+      .join("\n");
+  } else {
+    catMsg = "- No expenses logged yet.";
+  }
+
+  const summary = `\ud83d\udcca *Budget Status (${monthLabel})*
+
+\ud83d\udcb0 Budget: ${formatVND(trackedBudget)}
+\ud83d\udcc9 Spent: ${formatVND(totalSpent)} (${percentUsed}%)
+\ud83d\udcbc Remaining: ${formatVND(remaining)}
+
+\u23f1 *Spending Pace*
+${paceMsg}
+
+\ud83d\udcca *Top Categories*
+${catMsg}
+
+Reply *budget* to log more.
+Reply *budget status* anytime.`;
+
+  await sendText(env, customerId, summary);
+}
+
+// --- Budget: Cancel / Restart ---
+
+function isBudgetFlow(flow) {
+  return flow && flow.startsWith("budget_");
+}
+
+async function handleBudgetCancel(env, customerId) {
+  const st = await getState(env, customerId);
+  if (!isBudgetFlow(st.active_flow)) return false;
+
+  await sendText(
+    env,
+    customerId,
+    `\u274c Budget flow cancelled.
+
+Reply *budget* to start again.`
+  );
+  await clearState(env, customerId);
+  return true;
+}
+
+async function handleBudgetRestart(env, customerId) {
+  const st = await getState(env, customerId);
+  if (!isBudgetFlow(st.active_flow)) return false;
+
+  // Delete profile to force fresh setup
+  const { url } = getSupabaseConfig(env);
+  await fetch(
+    `${url}/rest/v1/budget_profiles?wa_from=eq.${encodeURIComponent(customerId)}`,
+    {
+      method: "DELETE",
+      headers: sbHeaders(env),
+    }
+  );
+  await fetch(
+    `${url}/rest/v1/budget_categories?wa_from=eq.${encodeURIComponent(customerId)}`,
+    {
+      method: "DELETE",
+      headers: sbHeaders(env),
+    }
+  );
+
+  await clearState(env, customerId);
+  await startBudgetFlow(env, customerId);
+  return true;
+}
+
+// --- Budget: Master text handler (routes to correct sub-handler) ---
+
+async function handleBudgetText(env, customerId, raw) {
+  const st = await getState(env, customerId);
+  if (!isBudgetFlow(st.active_flow)) return false;
+
+  const token = raw.trim().toUpperCase();
+
+  // Handle cancel/restart from any budget state
+  if (token === "CANCEL") {
+    return await handleBudgetCancel(env, customerId);
+  }
+  if (token === "RESTART") {
+    return await handleBudgetRestart(env, customerId);
+  }
+
+  // Route to the correct handler based on current state
+  switch (st.active_flow) {
+    case "budget_select_mode":
+      return await handleBudgetSelectMode(env, customerId, raw);
+    case "budget_full_1":
+      return await handleBudgetFull1(env, customerId, raw);
+    case "budget_full_2":
+      return await handleBudgetFull2(env, customerId, raw);
+    case "budget_full_3":
+      return await handleBudgetFull3(env, customerId, raw);
+    case "budget_full_4":
+      return await handleBudgetFull4(env, customerId, raw);
+    case "budget_limit_1":
+      return await handleBudgetLimit1(env, customerId, raw);
+    case "budget_limit_2":
+      return await handleBudgetLimit2(env, customerId, raw);
+    case "budget_log_amount":
+      return await handleBudgetLogAmount(env, customerId, raw);
+    case "budget_log_category":
+      return await handleBudgetLogCategory(env, customerId, raw);
+    case "budget_log_note":
+      return await handleBudgetLogNote(env, customerId, raw);
+    case "budget_log_another":
+      return await handleBudgetLogAnother(env, customerId, raw);
+    default:
+      return false;
+  }
+}
+
+// ---------- END BUDGET TRACKER ----------
+
 // ---------- STAMP handling ----------
 
 async function handleStamp(env, customerId, token) {
@@ -2060,6 +2846,23 @@ export async function onRequestPost({ request, env }) {
       // Handle LOG command
       if (token === "LOG") {
         await handleLogCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle BUDGET STATUS command (must check before BUDGET to avoid partial match)
+      if (token === "BUDGET STATUS") {
+        await handleBudgetStatus(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle BUDGET command
+      if (token === "BUDGET") {
+        await startBudgetFlow(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle active budget flow text input
+      if (await handleBudgetText(env, from, raw)) {
         return new Response("ok", { status: 200 });
       }
 
