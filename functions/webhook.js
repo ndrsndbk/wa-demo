@@ -1825,7 +1825,7 @@ async function getBudgetProfile(env, waFrom) {
     env,
     "budget_profiles",
     `wa_from=eq.${encodeURIComponent(waFrom)}`,
-    "id,wa_from,mode,total_budget_vnd,fixed_costs_vnd,savings_goal_vnd,discretionary_budget_vnd,available_budget_vnd,created_at,updated_at"
+    "id,wa_from,mode,total_budget_vnd,fixed_costs_vnd,savings_goal_vnd,discretionary_budget_vnd,available_budget_vnd,created_at,updated_at,timezone,reminders_enabled,last_user_message_at,last_expense_log_at,last_log_date,current_streak,longest_streak,on_track_streak,last_on_track_date,last_micro_reward_date"
   );
 }
 
@@ -1893,14 +1893,310 @@ async function getMonthlyExpenses(env, waFrom) {
   return await res.json();
 }
 
-// --- Budget: Session data store (uses conversation_state step as JSON) ---
-// We store budget session data in a lightweight way:
-// active_flow = "budget_*" states
-// step = numeric step (used to store sub-state data via a separate approach)
-// For complex data (like partial onboarding answers), we use a simple JSON
-// stored in a budget-specific field. To keep isolation, we store transient
-// session data in-memory via the conversation_state step field and
-// budget_profiles for persistent data.
+// --- Budget: Gamification helpers ---
+
+// Timezone-aware date helpers
+
+function getBudgetUserDate(timezone) {
+  const tz = timezone || "Asia/Ho_Chi_Minh";
+  const offsets = {
+    "Asia/Ho_Chi_Minh": 7, "Asia/Bangkok": 7, "Asia/Jakarta": 7,
+    "Asia/Tokyo": 9, "Asia/Seoul": 9, "Asia/Shanghai": 8,
+    "Asia/Singapore": 8, "Asia/Kolkata": 5.5, "UTC": 0,
+    "Europe/London": 0, "Europe/Berlin": 1, "America/New_York": -5,
+    "America/Los_Angeles": -8,
+  };
+  const offsetHours = offsets[tz] !== undefined ? offsets[tz] : 7;
+  const now = new Date();
+  const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+  return new Date(utc + (3600000 * offsetHours));
+}
+
+function getBudgetUserDateISO(timezone) {
+  const d = getBudgetUserDate(timezone);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function getBudgetUserHour(timezone) {
+  return getBudgetUserDate(timezone).getHours();
+}
+
+// Badge system
+
+const BADGE_INFO = {
+  STARTER_7:  { emoji: "\ud83c\udf1f", label: "7-Day Starter" },
+  SOLID_30:   { emoji: "\ud83d\udcaa", label: "30-Day Solid" },
+  ELITE_90:   { emoji: "\ud83c\udfc6", label: "90-Day Elite" },
+  SAVER_1M:   { emoji: "\ud83d\udcb0", label: "1-Month Saver" },
+  COMEBACK:   { emoji: "\ud83d\udd25", label: "Comeback Kid" },
+};
+
+async function getBudgetBadges(env, waFrom) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/budget_badges?wa_from=eq.${encodeURIComponent(waFrom)}&select=badge_code`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.map((r) => r.badge_code);
+}
+
+async function awardBadge(env, waFrom, badgeCode) {
+  await sbUpsert(env, "budget_badges", [{ wa_from: waFrom, badge_code: badgeCode }], ["wa_from", "badge_code"]);
+}
+
+function checkBadgeEligibility(profile, existingBadges) {
+  const newBadges = [];
+  const streak = profile.current_streak || 0;
+  const has = (code) => existingBadges.includes(code);
+
+  if (streak >= 7 && !has("STARTER_7")) newBadges.push("STARTER_7");
+  if (streak >= 30 && !has("SOLID_30")) newBadges.push("SOLID_30");
+  if (streak >= 90 && !has("ELITE_90")) newBadges.push("ELITE_90");
+  if ((profile.on_track_streak || 0) >= 30 && !has("SAVER_1M")) newBadges.push("SAVER_1M");
+
+  return newBadges;
+}
+
+// Streak computation (pure functions)
+
+function computeStreakUpdate(profile, todayISO) {
+  const lastLog = profile.last_log_date;
+  if (!lastLog) {
+    return { current_streak: 1, longest_streak: Math.max(1, profile.longest_streak || 0), last_log_date: todayISO };
+  }
+  if (lastLog === todayISO) {
+    return null; // already logged today
+  }
+  const last = new Date(lastLog + "T00:00:00Z");
+  const today = new Date(todayISO + "T00:00:00Z");
+  const diffDays = Math.round((today - last) / 86400000);
+
+  if (diffDays === 1) {
+    const newStreak = (profile.current_streak || 0) + 1;
+    return {
+      current_streak: newStreak,
+      longest_streak: Math.max(newStreak, profile.longest_streak || 0),
+      last_log_date: todayISO,
+    };
+  }
+  return { current_streak: 1, longest_streak: Math.max(1, profile.longest_streak || 0), last_log_date: todayISO };
+}
+
+function computeOnTrackUpdate(profile, totalSpentThisMonth, todayISO, monthInfo) {
+  let trackedBudget = 0;
+  if (profile.mode === "full") {
+    trackedBudget = Number(profile.discretionary_budget_vnd) || 0;
+  } else {
+    trackedBudget = Number(profile.available_budget_vnd) || 0;
+  }
+  const idealSpend = trackedBudget > 0 ? (trackedBudget / monthInfo.totalDays) * monthInfo.daysElapsed : 0;
+  const onTrack = totalSpentThisMonth <= idealSpend;
+
+  if (!onTrack) {
+    return { on_track_streak: 0, last_on_track_date: null };
+  }
+
+  const lastOTDate = profile.last_on_track_date;
+  if (!lastOTDate) {
+    return { on_track_streak: 1, last_on_track_date: todayISO };
+  }
+  if (lastOTDate === todayISO) {
+    return null; // already computed today
+  }
+  const last = new Date(lastOTDate + "T00:00:00Z");
+  const today = new Date(todayISO + "T00:00:00Z");
+  const diffDays = Math.round((today - last) / 86400000);
+
+  if (diffDays === 1) {
+    return { on_track_streak: (profile.on_track_streak || 0) + 1, last_on_track_date: todayISO };
+  }
+  return { on_track_streak: 1, last_on_track_date: todayISO };
+}
+
+// Micro-rewards
+
+function shouldSendMicroReward(profile, todayISO, context) {
+  if (profile.last_micro_reward_date === todayISO) return null; // max 1/day
+  const pool = [];
+  if (context.logsToday >= 3) pool.push("\ud83d\udd25 Three logs today \u2014 you\u2019re on fire!");
+  if (context.isWeekend) pool.push("\ud83c\udf1e Weekend logging = elite mindset. Most people skip weekends.");
+  if (context.isComeback) pool.push("\ud83d\udc4b You\u2019re back! That\u2019s what matters.");
+  if (context.newStreakMilestone) pool.push("\ud83c\udf89 New streak milestone! You\u2019re building a real habit.");
+  if (pool.length === 0) return null;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// Re-engagement & nudges
+
+function shouldShowReengagement(profile, nowUTC) {
+  if (!profile.reminders_enabled) return false;
+  if (!profile.last_user_message_at) return false;
+  const lastMsg = new Date(profile.last_user_message_at).getTime();
+  const hoursSince = (nowUTC - lastMsg) / 3600000;
+  if (hoursSince < 24) return false;
+  const localHour = getBudgetUserHour(profile.timezone);
+  return localHour >= 7 && localHour <= 21;
+}
+
+async function buildReengagementSummary(env, waFrom, profile) {
+  const expenses = await getMonthlyExpenses(env, waFrom);
+  const totalSpent = expenses.reduce((sum, e) => sum + Number(e.amount_vnd), 0);
+  const trackedBudget = profile.mode === "full"
+    ? Number(profile.discretionary_budget_vnd) || 0
+    : Number(profile.available_budget_vnd) || 0;
+  const remaining = trackedBudget - totalSpent;
+  const pct = trackedBudget > 0 ? Math.round((totalSpent / trackedBudget) * 100) : 0;
+  const monthLabel = getBudgetMonthLabel();
+  const { daysRemaining } = getBudgetMonthInfo();
+  const dailyLeft = daysRemaining > 0 ? Math.round(remaining / daysRemaining) : 0;
+
+  return `\ud83c\udf05 *Good morning!*
+
+Here\u2019s your budget so far \ud83d\udc47
+
+\ud83d\udcb0 Budget: ${formatVND(trackedBudget)}
+\ud83d\udcc9 Spent: ${formatVND(totalSpent)} (${pct}%)
+\ud83d\udcbc Remaining: ${formatVND(remaining)}
+\u23f1 ~${formatVND(dailyLeft)} / day for ${daysRemaining} days
+
+\ud83d\udcdd Log today\u2019s spending:
+Reply *budget*`;
+}
+
+function buildLossAversionNudge(oldStreak) {
+  return `\u26a0\ufe0f Your *${oldStreak}-day streak* was lost! But you\u2019re back \u2014 log an expense to start rebuilding \ud83d\udcaa`;
+}
+
+// Daily expense count helper
+
+async function getTodayExpenseCount(env, waFrom, todayISO) {
+  const { url } = getSupabaseConfig(env);
+  const res = await fetch(
+    `${url}/rest/v1/budget_expenses?wa_from=eq.${encodeURIComponent(waFrom)}&expense_date=eq.${todayISO}&select=id`,
+    { headers: sbHeaders(env) }
+  );
+  if (!res.ok) return 0;
+  const data = await res.json();
+  return data.length;
+}
+
+// --- Budget: Lazy evaluation orchestration ---
+
+async function budgetLazyCheck(env, waFrom) {
+  const profile = await getBudgetProfile(env, waFrom);
+  if (!profile) return;
+
+  const nowUTC = Date.now();
+  const todayISO = getBudgetUserDateISO(profile.timezone);
+  const monthInfo = getBudgetMonthInfo();
+  const notifications = [];
+
+  // 1. Re-engagement summary (lazy reminder)
+  if (shouldShowReengagement(profile, nowUTC)) {
+    const summary = await buildReengagementSummary(env, waFrom, profile);
+    notifications.push(summary);
+  }
+
+  // 2. Loss aversion nudge: had streak >= 3, missed a day
+  if (profile.last_log_date && profile.last_log_date !== todayISO) {
+    const last = new Date(profile.last_log_date + "T00:00:00Z");
+    const today = new Date(todayISO + "T00:00:00Z");
+    const diffDays = Math.round((today - last) / 86400000);
+    if (diffDays > 1 && (profile.current_streak || 0) >= 3) {
+      notifications.push(buildLossAversionNudge(profile.current_streak));
+      // Award COMEBACK badge
+      const badges = await getBudgetBadges(env, waFrom);
+      if (!badges.includes("COMEBACK")) {
+        await awardBadge(env, waFrom, "COMEBACK");
+        const info = BADGE_INFO.COMEBACK;
+        notifications.push(`${info.emoji} *Badge earned: ${info.label}!*\nYou came back after a break. Resilience matters!`);
+      }
+    }
+  }
+
+  // 3. On-track streak update
+  const expenses = await getMonthlyExpenses(env, waFrom);
+  const totalSpent = expenses.reduce((sum, e) => sum + Number(e.amount_vnd), 0);
+  const otUpdate = computeOnTrackUpdate(profile, totalSpent, todayISO, monthInfo);
+  if (otUpdate) {
+    await upsertBudgetProfile(env, waFrom, otUpdate);
+  }
+
+  // 4. Badge check
+  const currentBadges = await getBudgetBadges(env, waFrom);
+  const freshProfile = otUpdate ? { ...profile, ...otUpdate } : profile;
+  const newBadges = checkBadgeEligibility(freshProfile, currentBadges);
+  for (const code of newBadges) {
+    await awardBadge(env, waFrom, code);
+    const info = BADGE_INFO[code];
+    notifications.push(`${info.emoji} *Badge earned: ${info.label}!*`);
+  }
+
+  // 5. Send all notifications as one message
+  if (notifications.length > 0) {
+    await sendText(env, waFrom, notifications.join("\n\n---\n\n"));
+  }
+
+  // 6. Update last_user_message_at
+  await upsertBudgetProfile(env, waFrom, { last_user_message_at: new Date().toISOString() });
+}
+
+// --- Budget: Post-expense hook ---
+
+async function budgetPostExpenseHook(env, waFrom) {
+  const profile = await getBudgetProfile(env, waFrom);
+  if (!profile) return;
+
+  const todayISO = getBudgetUserDateISO(profile.timezone);
+  const now = new Date().toISOString();
+
+  // 1. Update logging streak
+  const streakUpdate = computeStreakUpdate(profile, todayISO);
+  const patch = { last_expense_log_at: now };
+  if (streakUpdate) {
+    Object.assign(patch, streakUpdate);
+  }
+  await upsertBudgetProfile(env, waFrom, patch);
+
+  // 2. Micro-reward check
+  const logsToday = await getTodayExpenseCount(env, waFrom, todayISO);
+  const dayOfWeek = getBudgetUserDate(profile.timezone).getDay();
+  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+  const isComeback = streakUpdate && streakUpdate.current_streak === 1 && (profile.current_streak || 0) >= 3;
+  const newStreakMilestone = streakUpdate && [7, 14, 21, 30, 60, 90].includes(streakUpdate.current_streak);
+
+  const rewardMsg = shouldSendMicroReward(profile, todayISO, {
+    logsToday,
+    isWeekend,
+    isComeback,
+    newStreakMilestone,
+  });
+
+  if (rewardMsg) {
+    await sendText(env, waFrom, rewardMsg);
+    await upsertBudgetProfile(env, waFrom, { last_micro_reward_date: todayISO });
+  }
+}
+
+// --- Budget: Reminder toggle handler ---
+
+async function handleBudgetToggleReminders(env, waFrom, enabled) {
+  const profile = await getBudgetProfile(env, waFrom);
+  if (!profile) {
+    await sendText(env, waFrom, "You don\u2019t have a budget set up yet.\n\nReply *budget* to get started.");
+    return;
+  }
+  await upsertBudgetProfile(env, waFrom, { reminders_enabled: enabled });
+  const msg = enabled
+    ? "\u2705 Budget reminders *resumed*. I\u2019ll check in when you\u2019ve been away for a day."
+    : "\u23f8\ufe0f Budget reminders *paused*. Reply *resume reminders* to turn them back on.";
+  await sendText(env, waFrom, msg);
+}
 
 // --- Budget: Flow handlers ---
 
@@ -2268,10 +2564,19 @@ async function handleBudgetLogCategory(env, customerId, raw) {
   // Save expense immediately
   await saveBudgetExpense(env, customerId, amount, selectedCategory, null);
 
+  // Post-expense hook: update streaks, check micro-rewards
+  await budgetPostExpenseHook(env, customerId);
+
+  // Fetch updated profile for streak display
+  const updatedProfile = await getBudgetProfile(env, customerId);
+  const streakLine = (updatedProfile?.current_streak || 0) > 1
+    ? `\n\ud83d\udd25 Streak: ${updatedProfile.current_streak} days`
+    : "";
+
   await sendText(
     env,
     customerId,
-    `\u2705 Logged: ${formatVND(amount)} \u2192 *${selectedCategory}*
+    `\u2705 Logged: ${formatVND(amount)} \u2192 *${selectedCategory}*${streakLine}
 
 Add an optional note? (or reply *skip*)
 
@@ -2345,13 +2650,14 @@ async function handleBudgetLogAnother(env, customerId, raw) {
 
   const remaining = tracked - totalSpent;
   const pct = tracked > 0 ? Math.round((totalSpent / tracked) * 100) : 0;
+  const streakNote = (profile?.current_streak || 0) > 1 ? ` | \ud83d\udd25 ${profile.current_streak}-day streak` : "";
 
   await sendText(
     env,
     customerId,
     `\ud83d\udc4d Done!
 
-\ud83d\udcb0 Spent this month: ${formatVND(totalSpent)} (${pct}%)
+\ud83d\udcb0 Spent this month: ${formatVND(totalSpent)} (${pct}%)${streakNote}
 \ud83d\udcbc Remaining: ${formatVND(remaining)}
 
 Reply *budget* to log more.
@@ -2435,6 +2741,16 @@ ${formatVND(Math.round(Math.abs(weeklyVariance)))} / week`;
     catMsg = "- No expenses logged yet.";
   }
 
+  // Gamification section
+  const badges = await getBudgetBadges(env, customerId);
+  const streakSection = `\ud83d\udd25 *Streaks*
+- Logging: ${profile.current_streak || 0} day${(profile.current_streak || 0) !== 1 ? "s" : ""} (best: ${profile.longest_streak || 0})
+- On-track: ${profile.on_track_streak || 0} day${(profile.on_track_streak || 0) !== 1 ? "s" : ""}`;
+
+  const badgeSection = badges.length > 0
+    ? `\n\n\ud83c\udfc5 *Badges* (${badges.length})\n` + badges.map((b) => `${BADGE_INFO[b]?.emoji || "\ud83c\udfc5"} ${BADGE_INFO[b]?.label || b}`).join(" | ")
+    : "";
+
   const summary = `\ud83d\udcca *Budget Status (${monthLabel})*
 
 \ud83d\udcb0 Budget: ${formatVND(trackedBudget)}
@@ -2446,6 +2762,8 @@ ${paceMsg}
 
 \ud83d\udcca *Top Categories*
 ${catMsg}
+
+${streakSection}${badgeSection}
 
 Reply *budget* to log more.
 Reply *budget status* anytime.`;
@@ -2505,6 +2823,9 @@ async function handleBudgetRestart(env, customerId) {
 async function handleBudgetText(env, customerId, raw) {
   const st = await getState(env, customerId);
   if (!isBudgetFlow(st.active_flow)) return false;
+
+  // Lazy evaluation check on any budget interaction
+  await budgetLazyCheck(env, customerId);
 
   const token = raw.trim().toUpperCase();
 
@@ -2849,14 +3170,26 @@ export async function onRequestPost({ request, env }) {
         return new Response("ok", { status: 200 });
       }
 
+      // Handle BUDGET reminder opt-out controls
+      if (token === "PAUSE REMINDERS" || token === "BUDGET PAUSE" || token === "STOP REMINDERS" || token === "BUDGET STOP") {
+        await handleBudgetToggleReminders(env, from, false);
+        return new Response("ok", { status: 200 });
+      }
+      if (token === "RESUME REMINDERS" || token === "BUDGET RESUME") {
+        await handleBudgetToggleReminders(env, from, true);
+        return new Response("ok", { status: 200 });
+      }
+
       // Handle BUDGET STATUS command (must check before BUDGET to avoid partial match)
       if (token === "BUDGET STATUS") {
+        await budgetLazyCheck(env, from);
         await handleBudgetStatus(env, from);
         return new Response("ok", { status: 200 });
       }
 
       // Handle BUDGET command
       if (token === "BUDGET") {
+        await budgetLazyCheck(env, from);
         await startBudgetFlow(env, from);
         return new Response("ok", { status: 200 });
       }
