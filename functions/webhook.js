@@ -2198,6 +2198,35 @@ async function handleBudgetToggleReminders(env, waFrom, enabled) {
   await sendText(env, waFrom, msg);
 }
 
+// --- Budget: Reset handler (works from anywhere) ---
+
+async function handleBudgetReset(env, waFrom) {
+  const profile = await getBudgetProfile(env, waFrom);
+  if (!profile) {
+    await sendText(env, waFrom, "You don\u2019t have a budget to reset.\n\nReply *budget* to get started.");
+    return;
+  }
+
+  const { url } = getSupabaseConfig(env);
+  // Delete profile, categories, expenses, and badges
+  await fetch(`${url}/rest/v1/budget_expenses?wa_from=eq.${encodeURIComponent(waFrom)}`, { method: "DELETE", headers: sbHeaders(env) });
+  await fetch(`${url}/rest/v1/budget_categories?wa_from=eq.${encodeURIComponent(waFrom)}`, { method: "DELETE", headers: sbHeaders(env) });
+  await fetch(`${url}/rest/v1/budget_badges?wa_from=eq.${encodeURIComponent(waFrom)}`, { method: "DELETE", headers: sbHeaders(env) });
+  await fetch(`${url}/rest/v1/budget_profiles?wa_from=eq.${encodeURIComponent(waFrom)}`, { method: "DELETE", headers: sbHeaders(env) });
+
+  await clearState(env, waFrom);
+
+  await sendText(
+    env,
+    waFrom,
+    `\ud83d\uddd1\ufe0f *Budget reset complete.*
+
+Your profile, categories, expenses, and badges have been cleared.
+
+Reply *budget* to set up a fresh budget.`
+  );
+}
+
 // --- Budget: Flow handlers ---
 
 async function startBudgetFlow(env, customerId) {
@@ -3167,6 +3196,12 @@ export async function onRequestPost({ request, env }) {
       // Handle LOG command
       if (token === "LOG") {
         await handleLogCommand(env, from);
+        return new Response("ok", { status: 200 });
+      }
+
+      // Handle RESET BUDGET command
+      if (token === "RESET BUDGET" || token === "BUDGET RESET") {
+        await handleBudgetReset(env, from);
         return new Response("ok", { status: 200 });
       }
 
